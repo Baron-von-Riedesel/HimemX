@@ -85,18 +85,45 @@
 ;       - test A20 changed (no more memory writes)
 ; japheth 2020:
 ;       - added multiple int 15h, ax=e820h memory block support
+;       - added alternative (re)alloc strategy (see below)
+
+; alternative strategy:
+;   1. when allocating an EMB, a new handle is allocated for the EMB that
+;      will be returned to the caller. The standard method allocates a new handle
+;      for the "free" block ( the block that "supplies" the memory ); this
+;      causes that block to "move" at the end of the handle list. This makes a
+;      difference if there are multiple "free" blocks. MS Himem uses the
+;      standard method!
+;   2. when an EMB is to be increased, the alternate strategy checks if the
+;      successor is a "free" block and that its size is large enough to satisfy the
+;      request. If so, the "free" block is reduced and the "used" block is increased.
+;      The standard allocates a (temporary) handle with the new size, copies the contents,
+;      then exchanges the handles (so the old handle describes the newly allocated
+;      block) and finally frees the temporary handle. This will fail if there isn't
+;      enough free space for the old size AND the new size simultaneously. MS Himem uses
+;      the alternative method.
+;   3. a request for a block with size 0 will return a "free" block if there are no
+;      unused handles available. The standard will return "free" blocks only if the
+;      requested size is > 0. MS Himem uses the alternative method.
 
 ;--- assembly time parameters
 
-VERSIONSTR		equ <'3.34'>
-DRIVER_VER		equ 300h+34
+VERSIONSTR		equ <'3.35'>
+DRIVER_VER		equ 300h+35
 INTERFACE_VER	equ 300h
 
+ifndef NUMHANDLES
 NUMHANDLES      equ 48      ;std 48, default number of handles
+endif
 ALLOWDISABLEA20 equ 1       ;std 1, 1=allow to disable A20
 BLOCKSIZE       equ 2000h   ;std 2000h, block size moved to/from ext. memory
 USEUNREAL       equ 1       ;std 1, 1=use "unreal" mode for EMB copy
 PREF66LGDT      equ 0       ;std 0, 1=use 66h prefix for LGDT
+?LOG            equ 0       ;std 0, 1=enable /LOG option
+?TESTMEM        equ 0       ;std 0, 1=enable /TESTMEM:ON|OFF option
+ifndef ?ALTSTRAT
+?ALTSTRAT       equ 0       ;std 0, 1=use alternate strategie for alloc emb
+endif
 
 ;MAXFREEKB      equ 0FBC0h
 MAXFREEKB       equ 0FFFFh  ;std FFFFh, xms v2.0 max ext. memory
@@ -285,6 +312,134 @@ _STACK  ends
 DGROUP  group   _RTEXT,_TEXT,_DATA,_STACK
 
 	.386P            ; 386 instructions + privileged opcodes
+
+;--- nonresident data
+
+_DATA segment
+
+;--- variables
+
+request_ptr				DD 0       ; pointer to request header
+xms_mem_free			DD 0       ; size of XMS in kbytes
+_xms_max				DD 4095*1024 ; value /MAX= parameter
+_xms_num_handles		DW NUMHANDLES ;value /NUMHANDLES= parameter
+_method					DB -1      ; value /METHOD: parameter
+_no_above_16			DB 00H     ; value /NOABOVE16 parameter
+_x_option				DB 00H     ; value /X parameter
+_startup_verbose		DB 00H     ; value /VERBOSE parameter
+if ?LOG
+_xms_logging_enabled	DB 00H     ; value /LOG parameter
+endif
+hma_exists				db 0
+
+;--- constants
+
+szStartup   	DB 'HimemX ', VERSIONSTR, ' [', @CatStr(!"%@Date!"), '] (c) 1995 Till Gerken, 2001-2006 tom ehlert',  0aH,  00H
+szQuestion		DB '/?',  00H
+szCannot		DB 'Option /? cannot be used as a device driver.',  0aH, 'Please'
+				DB ' run HimemX /? from the commandline',  00H
+if ?TESTMEM
+szTESTMEMOFF	DB '/TESTMEM:OFF',  00H
+endif
+szVERBOSE		DB '/VERBOSE',  00H
+if ?LOG
+szLOG			DB '/LOG',  00H
+endif
+szINTERFACE		DB 'Interface : XMS 3.00 80386 4G ',  0aH,  00H
+szNUMHANDLES	DB '/NUMHANDLES=',  00H
+szSelNumHandles	DB 'selected num_handles=%d',  0aH,  00H
+szNumHandlesLim1	DB 'HimemX: NUMHANDLES must be >= 8, corrected',  0aH,  00H
+szNumHandlesLim2	DB 'HimemX: NUMHANDLES must be <= 128, corrected',  0aH,  00H
+szNOABOVE16		DB '/NOABOVE16',  00H
+szX2MAX32		DB '/X2MAX32',  00H
+szNOX2MAX32		DB '/NOX2MAX32',  00H
+szX				DB '/X',  00H
+szMETHOD		DB '/METHOD:',  00H
+szMAX			DB '/MAX=',  00H
+szMaximum		DB 'Maximum XMS: %luK',  0aH,  00H
+szHMAMIN		DB '/HMAMIN=',  00H
+szMinimum		DB 'Minimum HMA that has to be requested: %uK',  0aH,  00H
+szHMAMAX		DB 'HimemX: HMAMIN must be <= 63, corrected',  0aH,  00H
+szINT151		DB '/INT15=',  00H
+szINT152		DB 'HimemX: /INT15=%x - not implemented',  07H,  0aH,  00H
+szignored		DB 'ignored commandline <%s>',  0aH,  00H
+;cant_disable_message db 'Can',27h,'t disable A20 - ignored',0dh,0ah,'$'
+
+dHimem			db 'HimemX: $'
+
+;-- method feedback text
+
+szKBC			db "KBC",'$'
+szPS2			db "PS/2",'$'
+szFast	  		db "Fast",'$'
+szBIOS  		db "BIOS",'$'
+szPort92 		db "Port 92",'$'
+szA20			db " A20 method used",13,10,'$'
+szAlwaysOn		db 'Always on','$'
+MsgUnknownA20	db 'No Supported A20 method detected',0dh,0ah,'$'
+
+old_dos 		db 'XMS needs at least DOS version 3.00.$'
+xms_twice		db 'XMS is already installed.$'
+vdisk_detected	db 'VDISK has been detected.$'
+no_386			db 'At least a 80386 is required.$'
+a20_error		db 'Unable to switch A20 address line.$'
+;xms_sizeerr 	db 'Unable to determine size of extended memory.$'
+xms_toosmall	db 'Extended memory is too small or not available.$'
+error_msg		db 'Driver won''t be installed.',7,13,10,'$'
+
+methods label byte
+	db 3,"kbc"       ;0 (A20_KBC)
+	db 3,"ps2"       ;1 (A20_PS2)
+	db 4,"bios"      ;2
+	db 8,"alwayson"  ;3
+	db 4,"fast"      ;4
+	db 6,"port92"    ;5
+	db 0
+
+if ?TESTMEM
+?TMSTR equ <" [/TESTMEM:ON|OFF]">
+else
+?TMSTR equ <" ">
+endif
+if ?LOG
+?LGSTR equ <" [/LOG]">
+else
+?LGSTR equ <" ">
+endif
+
+szHello label byte
+	db "Extended memory host for DOS (coordinates the usage of XMS and HMA)",10
+	db "HimemX is a device driver that is loaded in CONFIG.SYS.",10
+	db "Please place DEVICE=HIMEMX.EXE [options] before any driver using XMS.",10,10
+	db "options: [/MAX=####] [/METHOD:xxx] [/HMAMIN=n] [/NUMHANDLES=m]",10
+	db ?TMSTR," [/VERBOSE] [/NOABOVE16] [/X]",?LGSTR,10,10
+	db "  /MAX=#####      limit memory controlled by XMM to #####K.",10
+	db "                  The HMA is not affected by this value, it's always included",10
+	db "  /METHOD:xxx     Specifies the method to be used for A20 handling.",10
+	db "                  Possible values for xxx:",10
+	db "                  ALWAYSON    Assume that A20 line is permanently ON",10
+	db "                  BIOS        Use BIOS to toggle the A20 line",10
+	db "                  FAST        Use port 92h, bypass INT 15h test",10
+	db "                  PS2         Use port 92h, bypass PS/2 test",10
+	db "                  KBC         Use the keyboard controller",10
+	db "                  PORT92      Use port 92h always",10
+	db "  /HMAMIN=n       Specifies minimum number of Kbs of HMA that a program",10
+	db "                  must request to gain access to the HMA (default: 0Kb)",10
+	db "  /NOX2MAX32      No limit for XMS 2.0 free/avail. memory reports (default)",10
+	db "  /NUMHANDLES=m   Specifies number of XMS handles available (def: 48)",10
+if ?TESTMEM
+	db "  /TESTMEM:ON|OFF Performs or skips an extended memory test (def: OFF)",10
+endif
+	db "  /VERBOSE        Gives extra information",10 
+	db "  /NOABOVE16      Do not use INT 15h function E801h to detect >64M",10
+	db "  /X              Do not use INT 15h function E820h to detect >64M",10
+	db "  /X2MAX32        Limit XMS 2.0 free/avail. memory report to 32M-1K",10
+if ?LOG
+	db "  /LOG            Logs the driver activity to the screen",10
+endif
+	db 0
+
+_DATA ends
 
 ;******************************************************************************
 ; resident code and data
@@ -877,8 +1032,10 @@ xms_ext_alloc_emb::
 	push cx
 	pushf
 	cli
+ife ?ALTSTRAT
 	and edx,edx 			 ; a request for 0 kB might still work
 	jz @@nullhandle
+endif
 	mov cx,[xms_handle_table.xht_numhandles]	; check all handles
 	mov di, @word [xms_handle_table.xht_pArray] 
 @@nexthandle:
@@ -896,6 +1053,7 @@ xms_ext_alloc_emb::
 	pop edx
 	xor ax,ax
 	ret
+ife ?ALTSTRAT
 @@nullhandle:
 	push bx
 	call xms_alloc_handle	 ; get a free handle in BX
@@ -904,20 +1062,33 @@ xms_ext_alloc_emb::
 	mov bl,XMS_NO_HANDLE_LEFT
 	jc @@alloc_failed
 	xor ax,ax				 ; set ZF to skip code below
-
+endif
 @@found_block:
 	mov @word [di].XMS_HANDLE.xh_flags,XMSF_USED ;clear locks field, too
 	jz @@perfect_fit2				; if it fits perfectly, go on
 	push bx
 	call xms_alloc_handle			; get a free handle in BX
 	jc @@perfect_fit				; no more handles, use all mem left
+ife ?ALTSTRAT
 	mov esi,[di].XMS_HANDLE.xh_sizeK
 	mov [di].XMS_HANDLE.xh_sizeK,edx
 	sub esi,edx 					; calculate resting memory
-	add edx,[di].XMS_HANDLE.xh_baseK   ; calc new base address of free block 
+	add edx,[di].XMS_HANDLE.xh_baseK; calc new base address of free block 
 	mov @word [bx].XMS_HANDLE.xh_flags,XMSF_FREE
-	mov [bx].XMS_HANDLE.xh_baseK,edx
-	mov [bx].XMS_HANDLE.xh_sizeK,esi
+	mov [bx].XMS_HANDLE.xh_baseK,edx; set new base of free block
+	mov [bx].XMS_HANDLE.xh_sizeK,esi; set remaining size of free block
+else
+;--- alternate strategie: return the new allocated handle,
+;--- the found handle stays free
+	mov [di].XMS_HANDLE.xh_flags,XMSF_FREE
+	mov esi,[di].XMS_HANDLE.xh_baseK
+	add [di].XMS_HANDLE.xh_baseK,edx
+	sub [di].XMS_HANDLE.xh_sizeK,edx
+	mov [bx].XMS_HANDLE.xh_baseK,esi
+	mov [bx].XMS_HANDLE.xh_sizeK,edx
+	mov @word [bx].XMS_HANDLE.xh_flags,XMSF_USED ;clear locks field, too
+	mov di,bx
+endif
 @@perfect_fit:
 	pop bx
 @@perfect_fit2:
@@ -956,31 +1127,47 @@ xms_free_emb proc
 ;--- see if there are blocks to merge
 	mov eax,[si].XMS_HANDLE.xh_baseK   ; get base address
 	mov edx,[si].XMS_HANDLE.xh_sizeK
-	mov edi, eax
-	add eax, edx					; calculate end-address
+	mov edi, eax                    ; base in edi
+	add eax, edx					; end-address in eax
 	mov cl, XMSF_FREE
 	and edx, edx
-	jnz @@usefree
+	jnz @F
 	mov cl, XMSF_INPOOL
-@@usefree:
+@@:
 	mov [si].XMS_HANDLE.xh_flags,cl
 	jz @@done
 
+;--- scan the handle array
 	mov cx,[xms_handle_table.xht_numhandles]
 	mov bx,@word [xms_handle_table.xht_pArray] 
 @@nextitem:
 	cmp [bx].XMS_HANDLE.xh_flags,XMSF_FREE
 	jnz @@skipitem
-;	cmp si,bx
-;	jz @@skipitem
 	mov edx,[bx].XMS_HANDLE.xh_baseK
-	cmp eax, edx					; is successor also free?
-	je @@adjacent_1
+	cmp eax, edx				; is successor free?
+	je @F
 	add edx,[bx].XMS_HANDLE.xh_sizeK
-	cmp edi, edx
-	je @@adjacent_2
+	cmp edi, edx				; is predecessor free?
+	jne @@skipitem
+@@:
+;--- predecessor/successor in BX
+	cmp bx,si
+	jbe @F
+	xchg bx,si		;merge into the "lower" handle and free the "higher" handle
+@@:
+	xor edx, edx
+	xchg edx, [si].XMS_HANDLE.xh_sizeK
+	add [bx].XMS_HANDLE.xh_sizeK, edx	;new size is sum of both handle sizes
+	xor edx, edx
+	xchg edx, [si].XMS_HANDLE.xh_baseK
+	cmp edx, [bx].XMS_HANDLE.xh_baseK
+	ja @F
+	mov [bx].XMS_HANDLE.xh_baseK, edx	;new base is min(hdl1.base,hdl2.base)
+@@:
+	mov [si].XMS_HANDLE.xh_flags,XMSF_INPOOL
+	mov si,bx
 @@skipitem:
-	add bx,sizeof XMS_HANDLE	 ; skip to next handle
+	add bx,sizeof XMS_HANDLE
 	loop @@nextitem
 @@done:
 	popf
@@ -992,22 +1179,6 @@ xms_free_emb proc
 	mov bl,0
 @@exit:
 	ret
-
-@@adjacent_2:
-	push bx
-	xchg si,bx						; move predecessor to SI
-	call mergeblocks
-	pop bx
-	jmp @@skipitem
-@@adjacent_1:
-	push offset @@skipitem
-mergeblocks:
-	xor edx, edx					; merge 2 handles, then free one
-	mov [bx].XMS_HANDLE.xh_baseK,edx
-	mov [bx].XMS_HANDLE.xh_flags,XMSF_INPOOL
-	xchg edx, [bx].XMS_HANDLE.xh_sizeK
-	add [si].XMS_HANDLE.xh_sizeK,edx
-	retn
 
 xms_free_emb endp
 
@@ -1243,14 +1414,8 @@ endif
 	mov eax,cr0
 	inc ax					; set PE bit
 	mov cr0,eax
-if 0
-;--- setting CS to a protected-mode selector is not required
-;--- if we don't change CS while in protected-mode
-	db 0eah					; JMP FAR
-	dw offset @@to_pm,code16idx	   ; flush IPQ and load CS sel.
-@@to_pm:
-endif
-
+	jmp @F					; setting CS to a protected-mode selector is not required
+@@:
 	mov dx,data32sel
 	mov ds,dx
 	mov es,dx
@@ -1269,12 +1434,6 @@ endif
 
 	dec ax					; clear PE bit
 	mov cr0,eax
-if 0
-	db 0eah 				; JMP FAR
-	dw offset @@to_rm
-code_seg dw ?				; flush IPQ and load CS sel.
-@@to_rm:
-endif
 	popf
 	clc
 	ret
@@ -1314,7 +1473,8 @@ endif
 	mov cr0,eax
 ;--- the 80386 needs a "flush" after switching to PM
 ;--- before a segment register can be set!
-	jz $+2
+	jmp @F
+@@:
 	dec ax					; clear PE bit
 	mov ds,dx
 	mov es,dx
@@ -1549,6 +1709,37 @@ xms_ext_realloc_emb proc
 	jne @@ext_xms_locked
 
 	mov edx, ebx
+if ?ALTSTRAT
+	mov cx,[xms_handle_table.xht_numhandles]
+	mov di,@word [xms_handle_table.xht_pArray]
+	mov eax,[si].XMS_HANDLE.xh_sizeK
+	add eax,[si].XMS_HANDLE.xh_baseK
+nextitem:
+	cmp [di].XMS_HANDLE.xh_sizeK,0
+	jz @F
+	cmp eax,[di].XMS_HANDLE.xh_baseK
+	jz succ_found
+@@:
+	add di,sizeof XMS_HANDLE
+	loop nextitem
+	jmp no_succ
+succ_found:
+	cmp ebx,[si].XMS_HANDLE.xh_sizeK
+	jbe @@ext_shrink_it
+	test [di].XMS_HANDLE.xh_flags,XMSF_FREE
+	jz no_succ
+	sub edx,[si].XMS_HANDLE.xh_sizeK
+	cmp [di].XMS_HANDLE.xh_sizeK, edx
+	jc no_succ
+	sub [di].XMS_HANDLE.xh_sizeK, edx
+	jnz @F
+	mov [di].XMS_HANDLE.xh_flags, XMSF_INPOOL
+@@:
+	add [di].XMS_HANDLE.xh_baseK, edx
+	mov [si].XMS_HANDLE.xh_sizeK, ebx
+	jmp @@ext_grow_success
+no_succ:
+endif
 	cmp ebx,[si].XMS_HANDLE.xh_sizeK
 	jbe @@ext_shrink_it
 
@@ -1577,7 +1768,7 @@ xms_ext_realloc_emb proc
 	push ss
 	pop es				; es:si -> xms_move
 	call xms_move_emb
-	add sp, size xms_move
+	add sp, sizeof xms_move
 	push cs				; xms_move_emb eats critical ds value
 	pop ds
 
@@ -1751,9 +1942,10 @@ xms_dispatcher proc
 	nop
 @@:
 
+if ?LOG
 dispatcher_log_entry label byte
-
 	call log_entry      ; this might get patched
+endif
 
 	pushf
 	cmp ah,0fh			; 00-0F?
@@ -1771,7 +1963,6 @@ dispatcher_log_entry label byte
 	sub ah,4			; 8E-8F -> 8A-8B
 @@ok2:
 	sub ah, 88h-10h 	; 88-8B -> 10-13
-
 ;
 ;real dispatcher
 ;
@@ -1803,13 +1994,21 @@ dispatcher_log_entry label byte
 
 @@dispatcher_end:
 	popf
-
+if ?LOG
 dispatcher_log_exit label byte
 	call log_exit		; this might get patched
+endif
 	retf
 
 xms_dispatcher endp
 
+?PRINTSTR = 0
+ifdef _DEBUG 
+?PRINTSTR = 1
+endif
+?PRINTSTR = ?PRINTSTR + ?LOG
+
+if ?PRINTSTR
 ;*******************************************
 ; printing routines
 ;
@@ -1847,6 +2046,8 @@ endif
 
 printstring endp
 
+endif
+
 if 0
 
 printdx proc
@@ -1869,6 +2070,7 @@ printdx endp
 
 endif
 
+if ?LOG
 ;*** returns NZ, if we shall log NOW
 ;*** this will LOG stuff to screen only, if 
 ;*** SCROLL_LOCK is locked
@@ -1904,6 +2106,8 @@ log_exit proc
 	ret
 log_exit endp
 
+endif
+
 ;******************************************************************************
 ; mark for the trace log mode driver end. above has to be the resident part, 
 
@@ -1912,112 +2116,6 @@ log_exit endp
 trace_driver_end:
 
 _RTEXT ends
-
-;--- nonresident data
-
-_DATA segment
-
-;--- variables
-
-request_ptr				DD 0       ; pointer to request header
-xms_mem_free			DD 0       ; size of XMS in kbytes
-_xms_max				DD 4095*1024 ; value /MAX= parameter
-_xms_num_handles		DW NUMHANDLES ;value /NUMHANDLES= parameter
-_method					DB -1      ; value /METHOD: parameter
-_no_above_16			DB 00H     ; value /NOABOVE16 parameter
-_x_option				DB 00H     ; value /X parameter
-_startup_verbose		DB 00H     ; value /VERBOSE parameter
-_xms_logging_enabled	DB 00H     ; value /LOG parameter
-hma_exists				db 0
-
-;--- constants
-
-szStartup   	DB 'HimemX ', VERSIONSTR, ' [Feb 01 2020] (c) 1995, Till Gerken 2001-2006 tom ehlert',  0aH,  00H
-szQuestion		DB '/?',  00H
-szCannot		DB 'Option /? cannot be used as a device driver.',  0aH, 'Please'
-				DB ' run HimemX /? from the commandline',  00H
-szTESTMEMOFF	DB '/TESTMEM:OFF',  00H
-szVERBOSE		DB '/VERBOSE',  00H
-szLOG			DB '/LOG',  00H
-szINTERFACE		DB 'Interface : XMS 3.00 80386 4G ',  0aH,  00H
-szNUMHANDLES	DB '/NUMHANDLES=',  00H
-szSelNumHandles	DB 'selected num_handles=%d',  0aH,  00H
-szNumHandlesLim1	DB 'HimemX: NUMHANDLES must be >= 8, corrected',  0aH,  00H
-szNumHandlesLim2	DB 'HimemX: NUMHANDLES must be <= 128, corrected',  0aH,  00H
-szNOABOVE16		DB '/NOABOVE16',  00H
-szX2MAX32		DB '/X2MAX32',  00H
-szNOX2MAX32		DB '/NOX2MAX32',  00H
-szX				DB '/X',  00H
-szMETHOD		DB '/METHOD:',  00H
-szMAX			DB '/MAX=',  00H
-szMaximum		DB 'Maximum XMS: %luK',  0aH,  00H
-szHMAMIN		DB '/HMAMIN=',  00H
-szMinimum		DB 'Minimum HMA that has to be requested: %uK',  0aH,  00H
-szHMAMAX		DB 'HimemX: HMAMIN must be <= 63, corrected',  0aH,  00H
-szINT151		DB '/INT15=',  00H
-szINT152		DB 'HimemX: /INT15=%x - not implemented',  07H,  0aH,  00H
-szignored		DB 'ignored commandline <%s>',  0aH,  00H
-;cant_disable_message db 'Can',27h,'t disable A20 - ignored',0dh,0ah,'$'
-
-dHimem			db 'HimemX: $'
-
-;-- method feedback text
-
-szKBC			db "KBC",'$'
-szPS2			db "PS/2",'$'
-szFast	  		db "Fast",'$'
-szBIOS  		db "BIOS",'$'
-szPort92 		db "Port 92",'$'
-szA20			db " A20 method used",13,10,'$'
-szAlwaysOn		db 'Always on','$'
-MsgUnknownA20	db 'No Supported A20 method detected',0dh,0ah,'$'
-
-old_dos 		db 'XMS needs at least DOS version 3.00.$'
-xms_twice		db 'XMS is already installed.$'
-vdisk_detected	db 'VDISK has been detected.$'
-no_386			db 'At least a 80386 is required.$'
-a20_error		db 'Unable to switch A20 address line.$'
-;xms_sizeerr 	db 'Unable to determine size of extended memory.$'
-xms_toosmall	db 'Extended memory is too small or not available.$'
-error_msg		db 'Driver won''t be installed.',7,13,10,'$'
-
-methods label byte
-	db 3,"kbc"       ;0 (A20_KBC)
-	db 3,"ps2"       ;1 (A20_PS2)
-	db 4,"bios"      ;2
-	db 8,"alwayson"  ;3
-	db 4,"fast"      ;4
-	db 6,"port92"    ;5
-	db 0
-
-szHello label byte
-	db "Extended memory host for DOS (coordinates the usage of XMS and HMA)",10
-	db "HimemX is a device driver that is loaded in CONFIG.SYS.",10
-	db "Please place DEVICE=HIMEMX.EXE [options] before any driver using XMS.",10,10
-	db "options: [/MAX=####] [/METHOD:xxx] [/HMAMIN=n] [/NUMHANDLES=m]",10
-	db " [/TESTMEM:ON|OFF] [/VERBOSE] [/NOABOVE16] [/X] [/LOG]",10,10
-	db "  /MAX=#####      limit memory controlled by XMM to #####K",10
-	db "  /METHOD:xxx     Specifies the method to be used for A20 handling.",10
-	db "                  Possible values for xxx:",10
-	db "                  ALWAYSON    Assume that A20 line is permanently ON",10
-	db "                  BIOS        Use BIOS to toggle the A20 line",10
-	db "                  FAST        Use port 92h, bypass INT 15h test",10
-	db "                  PS2         Use port 92h, bypass PS/2 test",10
-	db "                  KBC         Use the keyboard controller",10
-	db "                  PORT92      Use port 92h always",10
-	db "  /HMAMIN=n       Specifies minimum number of Kbs of HMA that a program",10
-	db "                  must request to gain access to the HMA (default: 0Kb)",10
-	db "  /NOX2MAX32      No limit for XMS 2.0 free/avail. memory reports (default)",10
-	db "  /NUMHANDLES=m   Specifies number of XMS handles available (def: 48)",10
-	db "  /TESTMEM:ON|OFF Performs or skips an extended memory test (def: OFF)",10
-	db "  /VERBOSE        Gives extra information",10 
-	db "  /NOABOVE16      Do not use INT 15h function E801h to detect >64M",10
-	db "  /X              Do not use INT 15h function E820h to detect >64M",10
-	db "  /X2MAX32        Limit XMS 2.0 free/avail. memory report to 32M-1K",10
-	db "  /LOG            Logs the driver activity to the screen",10
-	db 0
-
-_DATA ends
 
 _TEXT segment
 
@@ -3258,58 +3356,49 @@ pszCmdLine equ <bp+6>
 	call _printf
 	pop bx
 
-	push offset szQuestion
+	push offset szQuestion	;/?
 	call _FindCommand
-
 	or ax,ax
-	je @@I232
+	je @F
 	or di,di
-	jne @@I232
-
-	push offset szCannot
+	jne @F
+	push offset szCannot	;option cannot be used as a device driver
 	call _printf
 	pop bx
-
-@@I232:
-
+@@:
+if ?TESTMEM
 	push offset szTESTMEMOFF
 	call _FindCommand
-
 	or ax,ax
-	jne @@I236
-
+	jne @F
 	push offset szQuestion
 	call _FindCommand
-
-@@I236:
+@@:
+endif
 
 	push offset szVERBOSE
 	call _FindCommand
-
 	or ax,ax
-	je @@I239
+	je @F
 	mov _startup_verbose,1
-@@I239:
-
+@@:
+if ?LOG
 	push offset szLOG
 	call _FindCommand
-
 	or ax,ax
-	je @@I241
+	je @F
 	mov _xms_logging_enabled,1
-@@I241:
+@@:
+endif
 	cmp _startup_verbose,0
-	je @@I243
-
+	je @F
 	push offset szINTERFACE
 	call _printf
 	pop bx
-
-@@I243:
+@@:
 
 	push offset szNUMHANDLES
 	call _FindCommand
-
 	or ax,ax
 	je @@I245
 
@@ -3317,9 +3406,7 @@ pszCmdLine equ <bp+6>
 	push 10
 	push ax
 	call _GetValue
-
 	mov _xms_num_handles,ax
-
 	cmp _startup_verbose,0
 	je @@I2471
 
@@ -3358,7 +3445,6 @@ pszCmdLine equ <bp+6>
 
 	push offset szX2MAX32
 	call _FindCommand
-
 	or ax,ax
 	je @@I255
 	mov _x2max32,32767	;7fffH
@@ -3366,7 +3452,6 @@ pszCmdLine equ <bp+6>
 
 	push offset szNOX2MAX32
 	call _FindCommand
-
 	or ax,ax
 	je @@I257
 	mov _x2max32,-1	;ffffH
@@ -3374,7 +3459,6 @@ pszCmdLine equ <bp+6>
 
 	push offset szX
 	call _FindCommand
-
 	or ax,ax
 	je @@I259
 	mov _x_option,1
@@ -3382,7 +3466,6 @@ pszCmdLine equ <bp+6>
 
 	push offset szMETHOD
 	call _FindCommand
-
 	or ax,ax
 	je @@I261
 
@@ -3394,7 +3477,6 @@ pszCmdLine equ <bp+6>
 
 	push offset szMAX
 	call _FindCommand
-
 	or ax,ax
 	je @@I263
 
@@ -3418,7 +3500,6 @@ pszCmdLine equ <bp+6>
 
 	push offset szHMAMIN
 	call _FindCommand
-
 	or ax,ax
 	je @@I267X
 
@@ -3451,7 +3532,6 @@ pszCmdLine equ <bp+6>
 
 	push offset szINT151
 	call _FindCommand
-
 	or ax,ax
 	je @@I273
 
@@ -3541,9 +3621,9 @@ exit:
 seti15handle endp
 
 ;-- look for extended memory, int 15h, ax/ah 0e820h -> 0e801h -> 88h
-;-- in: si->handle array
+;-- in: ds:si->handle array
 ;-- updates variable xms_mem_free
-;-- modifies eax, ebx, ecx, edx, esi, edi
+;-- modifies eax, ebx, ecx, edx, si, di
 
 geti15mem proc
 
@@ -3721,10 +3801,13 @@ initialize proc
 ifdef _DEBUG
 	jmp @F
 else
+if ?LOG
 	cmp [_xms_logging_enabled],0
 	jne @F
 endif
+endif
 
+if ?LOG
 	mov di, offset dispatcher_log_entry
 	lea si, [di+3]
 	mov cx, offset dispatcher_log_exit - (offset dispatcher_log_entry + 2)
@@ -3736,6 +3819,7 @@ endif
 	add si, 3
 	and si, not 3
 @@:
+endif
 	mov @word xms_handle_table.xht_pArray+0, si
 	mov @word xms_handle_table.xht_pArray+2, ds
 

@@ -5,17 +5,21 @@
   (short: FDHimem) with bugfixes, optimizations and extensions.
   To see its usage just run HIMEMX.EXE
 
-  UMBM is a small tool which, if used together with UMBPCI, might allow
-  to load HimemX in DOS upper memory. To see its usage just run UMBM.EXE
 
 
   2. History
 
-  02/01/2020, v3.34:
+  __/__/2020, v3.35:
+  - implemented an alternative memory (re)alloc method that may work
+    better if extended memory consists of multiple blocks.
+
+  02/04/2020, v3.34:
   - the amount of extended memory restricted by /MAX doesn't include the
     HMA.
   - multiple free memory blocks reported by int 15h, ax=e820h can now be
     handled.
+  - /LOG option has been removed, can be activated in the source code.
+  - /TESTMEM:ON|OFF option has been removed, since not implemented.
 
   --/--/2009, v3.33:
 
