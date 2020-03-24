@@ -2,6 +2,7 @@
   History
 
   __/__/2020, v3.35:
+  - realloc emb will try to grow the emb "in-place" if possible.
   - added a second version of HimemX.exe, called HimemX2.exe.
 
   02/04/2020, v3.34:

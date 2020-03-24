@@ -9,42 +9,26 @@
   2. HimemX and HimemX2
  
   Currently there are 2 versions of HimemX supplied, HimemX and HimemX2.
-  The differences are:
+  HimemX2 uses a different strategy when it comes to extended memory block
+  allocations. This difference is only relevant if extended memory is 
+  scattered in multiple blocks, as it is the case on newer machines.
+  Then, generally, HimemX2 tends to allocate memory blocks from low addresses
+  to high addresses, while the addresses of memory blocks allocated by
+  HimemX are a "wild" mix.
 
-   a) HimemX2: when allocating an EMB, a new handle is allocated for the EMB 
-      that will be returned to the caller.
-      HimemX: a new handle is allocated and will get the rest of the memory 
-      block that has "supplied" the memory. The caller will receive the "old"
-      handle of this block. As a consequence, the block "moves" to the end of
-      the handle array. This makes a difference for subsequent allocations, 
-      if extended memory is scattered.
-   b) HimemX2: when an EMB is to be increased, it is checked whether the
-      successor is a "free" block and if its size is large enough to satisfy
-      the request. If so, the successor's size is reduced and the EMB is
-      enlarged. 
-      HimemX: uses a very simple (and dull) strategy: a temporary handle is 
-      allocated, with the requested size; then the content is copied. Since
-      the handle provided by the caller must not change, the contents of both
-      handles are exchanged. Finally the temporarily allocated handle is 
-      released again.
-   c) HimemX2: a request for a block with size 0 may return a handle with
-      size > 0 if no more unused handles are available.
-      HimemX: a request for a block with size 0 will fail if no unused handles
-      are available.
+   Since the allocation strategy of HimemX is the one also used by MS Himem,
+  it is probably to be prefered. OTOH, MS Himem is from a time when extended
+  memory wasn't scattered, so this argument hasn't much weight - there are
+  no known incompatibilities of HimemX2.
 
-  As for MS Himem, for b) and c) it follows HimemX2, while for a) it behaves
-  like HimemX.
-  
-   HimemX2 is a test only. In the end, it is planned to activate at least b)
-  and c) in the standard (in HimemX).
-   At least b) is a true bug in HimemX. Example: if there's a pool of 64 MB of
-  extended memory and 32 MB have been allocated, a try to increase the 
-  allocated block to 34 MB will fail, because HimemX's strategy implies that
-  there's enough space for both the old and new size at the same time.
-   As for a), there's no decision yet. The new strategy has the advantage that 
-  it is virtually ensured that memory is allocated from "bottom" to "top" if
-  memory is scattered. This is good for Jemm386, because it needs its DMA
-  buffer to reside in the first 16 MB of memory.
+   In any case, HimemX2 most likely is a cure if Jemm386 reports 
+  "Warning: address of allocated EMB (=xxxxxxxx) is beyond 16 MB".
+  This warning indicates that Jemm386 couldn't locate its DMA buffer in an
+  address range where ISA DMA is working. ISA DMA is used by the floppy
+  controller and may be used by the parallel port or ISA expansion cards.
+  These are now virtually obsolete devices, but to be sure, use HimemX2 if
+  you get the warning mentioned above - the warning is displayed by 
+  Jemm386 v5.80+ only.
 
 
   3. License

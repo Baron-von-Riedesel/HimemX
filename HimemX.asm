@@ -1013,7 +1013,7 @@ xms_ext_alloc_emb::
 	push cx
 	pushf
 	cli
-ife ?ALTSTRAT
+if 0; v3.35 check for size 0 after scan!
 	and edx,edx 			 ; a request for 0 kB might still work
 	jz @@nullhandle
 endif
@@ -1027,6 +1027,10 @@ endif
 @@skipitem:
 	add di,sizeof XMS_HANDLE	 ; skip to next handle
 	loop @@nexthandle
+if 1; v3.35 check for size 0
+	and edx,edx 			 ; a request for 0 kB might still work
+	jz @@nullhandle
+endif
 	mov bl,XMS_ALL_MEM_ALLOCATED
 @@alloc_failed:
 	popf
@@ -1034,7 +1038,6 @@ endif
 	pop edx
 	xor ax,ax
 	ret
-ife ?ALTSTRAT
 @@nullhandle:
 	push bx
 	call xms_alloc_handle	 ; get a free handle in BX
@@ -1043,7 +1046,7 @@ ife ?ALTSTRAT
 	mov bl,XMS_NO_HANDLE_LEFT
 	jc @@alloc_failed
 	xor ax,ax				 ; set ZF to skip code below
-endif
+
 @@found_block:
 	mov @word [di].XMS_HANDLE.xh_flags,XMSF_USED ;clear locks field, too
 	jz @@perfect_fit2				; if it fits perfectly, go on
@@ -1690,40 +1693,36 @@ xms_ext_realloc_emb proc
 	jne @@ext_xms_locked
 
 	mov edx, ebx
-if ?ALTSTRAT
+if 1;v3.35
 	mov cx,[xms_handle_table.xht_numhandles]
 	mov di,@word [xms_handle_table.xht_pArray]
 	mov eax,[si].XMS_HANDLE.xh_sizeK
 	add eax,[si].XMS_HANDLE.xh_baseK
 nextitem:
-	cmp [di].XMS_HANDLE.xh_sizeK,0
-	jz @F
-	cmp eax,[di].XMS_HANDLE.xh_baseK
-	jz succ_found
-@@:
+	test [di].XMS_HANDLE.xh_flags,XMSF_FREE	;scan "free embs" only
+	jz skipitem
+	cmp eax,[di].XMS_HANDLE.xh_baseK	;successor?
+	jnz skipitem
+	mov eax,[si].XMS_HANDLE.xh_sizeK
+	add eax,[di].XMS_HANDLE.xh_sizeK	;get the total size
+	cmp edx,eax                         ;new size > total size?
+	ja @@ext_growing                    ;then the handle can't grow, have to copy...
+	sub edx,[si].XMS_HANDLE.xh_sizeK	;get the size which is additionally needed (might be < 0!)
+	mov [si].XMS_HANDLE.xh_sizeK, ebx
+	add [di].XMS_HANDLE.xh_baseK, edx
+	sub [di].XMS_HANDLE.xh_sizeK, edx
+	jnz @@ext_grow_success              ;remaining size > 0?
+	mov [di].XMS_HANDLE.xh_flags, XMSF_INPOOL	;no, so free the handle
+	mov [di].XMS_HANDLE.xh_baseK, 0
+	jmp @@ext_grow_success
+skipitem:
 	add di,sizeof XMS_HANDLE
 	loop nextitem
-	jmp no_succ
-succ_found:
-	cmp ebx,[si].XMS_HANDLE.xh_sizeK
-	jbe @@ext_shrink_it
-	test [di].XMS_HANDLE.xh_flags,XMSF_FREE
-	jz no_succ
-	sub edx,[si].XMS_HANDLE.xh_sizeK
-	cmp [di].XMS_HANDLE.xh_sizeK, edx
-	jc no_succ
-	sub [di].XMS_HANDLE.xh_sizeK, edx
-	jnz @F
-	mov [di].XMS_HANDLE.xh_flags, XMSF_INPOOL
-@@:
-	add [di].XMS_HANDLE.xh_baseK, edx
-	mov [si].XMS_HANDLE.xh_sizeK, ebx
-	jmp @@ext_grow_success
-no_succ:
 endif
 	cmp ebx,[si].XMS_HANDLE.xh_sizeK
 	jbe @@ext_shrink_it
 
+@@ext_growing:
 ; growing, try to allocate a new block
 
 	call xms_ext_alloc_emb	;get a new handle in DX, size EDX
@@ -1804,13 +1803,21 @@ endif
 	push bx
 	call xms_alloc_handle			 ; alloc a handle in BX, size EDI
 	jc @@ext_no_xms_handles_left	 ; return if there's an error
+	mov [bx].XMS_HANDLE.xh_baseK, edx
+	mov [bx].XMS_HANDLE.xh_sizeK, edi
+if 1;v3.35
+;--- if this branch is active, there's surely NO free successor
+;--- so we don't need to merge.
+	mov [bx].XMS_HANDLE.xh_flags,XMSF_FREE
+	pop bx
+	popf
+else
 	mov @word [bx].XMS_HANDLE.xh_flags,XMSF_USED
-	mov [bx].XMS_HANDLE.xh_baseK,edx
-	mov [bx].XMS_HANDLE.xh_sizeK,edi
 	mov dx,bx						 ; and FREE it again -
 	pop bx
 	popf
 	call xms_free_emb				 ; to merge it with free block list
+endif
 
 @@ext_dont_need_handle:
 @@ext_grow_success:
