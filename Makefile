@@ -15,7 +15,10 @@ OUTD=Release
 OPTD=
 !endif
 
-ALL: $(OUTD)\$(NAME).exe $(OUTD)\$(NAME)2.exe
+ALL: $(OUTD) $(OUTD)\$(NAME).exe $(OUTD)\$(NAME)2.exe
+
+$(OUTD):
+	@mkdir $(OUTD)
 
 $(OUTD)\$(NAME).exe: $(NAME).asm Makefile
 	@jwasm.exe -mz -nologo $(OPTD) -Sg -Fl$*.lst -Fo$*.exe $(NAME).asm
@@ -24,4 +27,4 @@ $(OUTD)\$(NAME)2.exe: $(NAME).asm Makefile
 	@jwasm.exe -mz -nologo $(OPTD) -D?ALTSTRAT=1 -Sg -Fl$*.lst -Fo$*.exe $(NAME).asm
 
 clean:
-	erase $(OUTD)\*.exe
+	@erase $(OUTD)\*.exe

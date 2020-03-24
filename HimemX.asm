@@ -84,27 +84,8 @@
 ;       - C part abandoned to simplify the make process and reduce binary size
 ;       - test A20 changed (no more memory writes)
 ; japheth 2020:
-;       - added multiple int 15h, ax=e820h memory block support
-;       - added alternative (re)alloc strategy (see below)
-
-; alternative strategy:
-;   1. when allocating an EMB, a new handle is allocated for the EMB that
-;      will be returned to the caller. The standard method allocates a new handle
-;      for the "free" block ( the block that "supplies" the memory ); this
-;      causes that block to "move" at the end of the handle list. This makes a
-;      difference if there are multiple "free" blocks. MS Himem uses the
-;      standard method!
-;   2. when an EMB is to be increased, the alternate strategy checks if the
-;      successor is a "free" block and that its size is large enough to satisfy the
-;      request. If so, the "free" block is reduced and the "used" block is increased.
-;      The standard allocates a (temporary) handle with the new size, copies the contents,
-;      then exchanges the handles (so the old handle describes the newly allocated
-;      block) and finally frees the temporary handle. This will fail if there isn't
-;      enough free space for the old size AND the new size simultaneously. MS Himem uses
-;      the alternative method.
-;   3. a request for a block with size 0 will return a "free" block if there are no
-;      unused handles available. The standard will return "free" blocks only if the
-;      requested size is > 0. MS Himem uses the alternative method.
+;       - v3.34: added multiple int 15h, ax=e820h memory block support
+;       - v3.35: added alternative (re)alloc strategy (?ALTSTRAT).
 
 ;--- assembly time parameters
 
@@ -122,7 +103,7 @@ PREF66LGDT      equ 0       ;std 0, 1=use 66h prefix for LGDT
 ?LOG            equ 0       ;std 0, 1=enable /LOG option
 ?TESTMEM        equ 0       ;std 0, 1=enable /TESTMEM:ON|OFF option
 ifndef ?ALTSTRAT
-?ALTSTRAT       equ 0       ;std 0, 1=use alternate strategie for alloc emb
+?ALTSTRAT       equ 0       ;std 0, 1=use alternate strategie for (re)alloc emb
 endif
 
 ;MAXFREEKB      equ 0FBC0h

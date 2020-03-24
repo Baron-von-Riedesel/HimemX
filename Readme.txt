@@ -6,89 +6,45 @@
   To see its usage just run HIMEMX.EXE
 
 
+  2. HimemX and HimemX2
+ 
+  Currently there are 2 versions of HimemX supplied, HimemX and HimemX2.
+  The differences are:
 
-  2. History
+   a) HimemX2: when allocating an EMB, a new handle is allocated for the EMB 
+      that will be returned to the caller.
+      HimemX: a new handle is allocated and will get the rest of the memory 
+      block that has "supplied" the memory. The caller will receive the "old"
+      handle of this block. As a consequence, the block "moves" to the end of
+      the handle array. This makes a difference for subsequent allocations, 
+      if extended memory is scattered.
+   b) HimemX2: when an EMB is to be increased, it is checked whether the
+      successor is a "free" block and if its size is large enough to satisfy
+      the request. If so, the successor's size is reduced and the EMB is
+      enlarged. 
+      HimemX: uses a very simple (and dull) strategy: a temporary handle is 
+      allocated, with the requested size; then the content is copied. Since
+      the handle provided by the caller must not change, the contents of both
+      handles are exchanged. Finally the temporarily allocated handle is 
+      released again.
+   c) HimemX2: a request for a block with size 0 may return a handle with
+      size > 0 if no more unused handles are available.
+      HimemX: a request for a block with size 0 will fail if no unused handles
+      are available.
 
-  __/__/2020, v3.35:
-  - implemented an alternative memory (re)alloc method that may work
-    better if extended memory consists of multiple blocks.
-
-  02/04/2020, v3.34:
-  - the amount of extended memory restricted by /MAX doesn't include the
-    HMA.
-  - multiple free memory blocks reported by int 15h, ax=e820h can now be
-    handled.
-  - /LOG option has been removed, can be activated in the source code.
-  - /TESTMEM:ON|OFF option has been removed, since not implemented.
-
-  --/--/2009, v3.33:
-
-
-  03/13/2008, v3.32:
-  - the amount of extended memory restricted by /MAX does now include the
-    HMA. That means, a /MAX=2048k parameter restricts Himem to exactly 
-    use range 0x100000-0x2FFFFF.
-  - TASM compatibility abandoned (didn't work with v3.31 either). Instead
-    source is now compatible with JWasm.
-  - binary size reduction.
-
-  07/23/2007, v3.31:
-  - bugfix: for MS-DOS v6.22 and below, HimemX damaged parts of its code
-    during initialization.
-  - bugfix: after PE bit is set on a 80386/80486, there must be at least
-    1 instruction before a segment register can be set. This wasn't true
-    in v3.30 using unreal mode.
-
-  04/29/2007: v3.30 
-  - binary size reduction
-
-  04/19/2007, v3.29:
-  - bugfix: in XMS functions 08h/88h the BH register was modified.
-  - bugfix: global disable A20 does no longer disable A20 if the local 
-    disable counter is > 0.
-  - UMBM.EXE added    
-
-  04/13/2007, v3.28:
-  - bugfix: to mark unused handles FDHimem moves 01 ("free") into the flag
-    field of the XMS handle and clears base address and size. HimemX
-    marks unused handles by moving 04 ("unallocated") into the flag field,
-    which is the - documented - MS Himem way to do it.
-  - bugfix: FDHimem's "block move" implementation unconditionally enables
-    interrupts if cpu is in v86-mode. HimemX never enables interrupts if
-    IF is cleared on entry.
-  - bugfix: the "resize EMB" function (AH=0Fh/8Fh) of FDHimem is not 
-    reentrant.
-  - bugfix: in real-mode, FDHimem switches to protected mode and sets DS,ES
-    to a flat, 4GB data selector to move to/from extended memory. After the
-    move DS and ES are not reset to a "standard" segment with FFFFh limit.
-    This in fact enables and keeps "unreal mode" unintentionally.
-  - bugfix: for XMS local disable A20 function, FDHimem does not test an
-    underflow condition of the counter (0 -> -1)
-  - bugfix: HimemX checks for a 80386 cpu *before* using 32bit opcodes, so
-    there is a true chance that this driver will not crash on a 80286.
-  - bugfix: FDHimem's hook code for int 15h, ah=87h does not return reported 
-    status of carry flag to the caller.
-  - bugfix: FDHimem's implementation of function 0E (get handle info) might
-    have returned 0 for block size if block size was indeed exactly 64 MB.
-  - bugfix: FDHimem opens an "interrupt window" in v86-mode only. HimemX opens
-    an "interrupt window" in both v86- and real-mode.
-  - bugfix: if no extended memory is free, FDHimem doesn't allow to allocate
-    an EMB with size 0. MS Windows 9x needs this feature.
-  - in FDHimem the routine which tests whether A20 is enabled is more
-    complicated than necessary.
-  - in FDHimem the code which switches to protected-mode and back 
-    sets/restores CS which is not necessary.
-  - some variables which don't have to be resident were moved to the _DATA
-    section, thus reducing size of the resident part.
-  - HimemX is written completely in ASM, the C part has been abandoned.
-  - unused code in resident part has been deactivated (proc delay2)
-  - default number of handles in HimemX is 48, in FDHimem it is 72.
-  - /X2MAX32 switch is off by default in HimemX, it is on in FDHimem.
-  - if extended memory is >= 64 MB, the size returned by XMS V2 function
-    is 65535 kB in HimemX, FDHimem returns 64448 kB.
-  - generally, the source was changed from TASM IDEAL to MASM format.
-    It still can be assembled by TASM, though. OW's WASM cannot be used.
-  - HimemX uses "unreal" mode for moving EMBs if cpu is not in v86-mode.
+  As for MS Himem, for b) and c) it follows HimemX2, while for a) it behaves
+  like HimemX.
+  
+   HimemX2 is a test only. In the end, it is planned to activate at least b)
+  and c) in the standard (in HimemX).
+   At least b) is a true bug in HimemX. Example: if there's a pool of 64 MB of
+  extended memory and 32 MB have been allocated, a try to increase the 
+  allocated block to 34 MB will fail, because HimemX's strategy implies that
+  there's enough space for both the old and new size at the same time.
+   As for a), there's no decision yet. The new strategy has the advantage that 
+  it is virtually ensured that memory is allocated from "bottom" to "top" if
+  memory is scattered. This is good for Jemm386, because it needs its DMA
+  buffer to reside in the first 16 MB of memory.
 
 
   3. License
