@@ -31,7 +31,12 @@
   Jemm386 v5.80+ only.
 
 
-  3. License
+  3. UMBM
+
+  To find out the purpose of UMBM.EXE, just run it from the command line.
+
+
+  4. License
   
   All changes done for HimemX are Public Domain. However, since HimemX is
   derived from FD Himem, the FD Himem copyrights do apply. FD Himem is

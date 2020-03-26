@@ -75,7 +75,7 @@
 ;
 ;******************************************************************************
 ; japheth 2007 (all changes Public Domain): 
-;       - bugs fixed (see readme.txt for details)
+;       - bugs fixed (see History.txt for details)
 ;       - source changed from IDEAL to MASM format
 ;       - optimizations to reduce size of resident part
 ;       - use "unreal" mode for EMB moves
@@ -85,7 +85,8 @@
 ;       - test A20 changed (no more memory writes)
 ; japheth 2020:
 ;       - v3.34: added multiple int 15h, ax=e820h memory block support
-;       - v3.35: added alternative (re)alloc strategy (?ALTSTRAT).
+;       - v3.35: added alternative (re)alloc strategy (HimemX2).
+;                see Readme.txt & History.txt for details.
 
 ;--- assembly time parameters
 
@@ -105,6 +106,7 @@ PREF66LGDT      equ 0       ;std 0, 1=use 66h prefix for LGDT
 ifndef ?ALTSTRAT
 ?ALTSTRAT       equ 0       ;std 0, 1=use alternate strategie for (re)alloc emb
 endif
+?MERGE0HDL      equ 1       ;std 0, 1=try to merge even if handle to free has size 0
 
 ;MAXFREEKB      equ 0FBC0h
 MAXFREEKB       equ 0FFFFh  ;std FFFFh, xms v2.0 max ext. memory
@@ -1113,6 +1115,7 @@ xms_free_emb proc
 	mov edx,[si].XMS_HANDLE.xh_sizeK
 	mov edi, eax                    ; base in edi
 	add eax, edx					; end-address in eax
+ife ?MERGE0HDL
 	mov cl, XMSF_FREE
 	and edx, edx
 	jnz @F
@@ -1120,8 +1123,10 @@ xms_free_emb proc
 @@:
 	mov [si].XMS_HANDLE.xh_flags,cl
 	jz @@done
+endif
 
-;--- scan the handle array
+;--- now scan the handle array for successor/predecessor
+
 	mov cx,[xms_handle_table.xht_numhandles]
 	mov bx,@word [xms_handle_table.xht_pArray] 
 @@nextitem:
@@ -1137,7 +1142,7 @@ xms_free_emb proc
 ;--- predecessor/successor in BX
 	cmp bx,si
 	jbe @F
-	xchg bx,si		;merge into the "lower" handle and free the "higher" handle
+	xchg bx,si					;merge into the "lower" handle and free the "higher" handle
 @@:
 	xor edx, edx
 	xchg edx, [si].XMS_HANDLE.xh_sizeK
@@ -1153,6 +1158,14 @@ xms_free_emb proc
 @@skipitem:
 	add bx,sizeof XMS_HANDLE
 	loop @@nextitem
+if ?MERGE0HDL
+	mov cl, XMSF_FREE
+	cmp [si].XMS_HANDLE.xh_sizeK,0
+	jnz @F
+	mov cl, XMSF_INPOOL
+@@:
+	mov [si].XMS_HANDLE.xh_flags,cl
+endif
 @@done:
 	popf
 	pop edx

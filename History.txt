@@ -1,8 +1,10 @@
 
   History
 
-  __/__/2020, v3.35:
-  - realloc emb will try to grow the emb "in-place" if possible.
+  03/26/2020, v3.35:
+  - realloc emb will try to grow the emb "in-place" if possible. This is
+    similiar to what MS Himem does.
+  - requests for embs with size 0 are now handled the way MS Himem does.
   - added a second version of HimemX.exe, called HimemX2.exe.
 
   02/04/2020, v3.34:
