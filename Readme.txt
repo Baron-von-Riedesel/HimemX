@@ -3,7 +3,7 @@
 
   HimemX is a XMS memory manager. It's derived from FreeDOS Himem 
   (short: FDHimem) with bugfixes, optimizations and extensions.
-  To see its usage just run HIMEMX.EXE
+  To see its usage just run HIMEMX.EXE from the command line.
 
 
   2. HimemX and HimemX2

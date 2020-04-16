@@ -1806,16 +1806,22 @@ endif
 	ret
 
 @@ext_shrink_it:
-	mov edi,[si].XMS_HANDLE.xh_sizeK	; get old size
-	mov [si].XMS_HANDLE.xh_sizeK, edx
+	mov edi,[si].XMS_HANDLE.xh_sizeK ; get old size
 	sub edi,edx 					 ; calculate what's left over
 	jz @@ext_dont_need_handle		 ; jump if we don't need another handle
-	add edx,[si].XMS_HANDLE.xh_baseK	; calculate new base address
+if 0; v3.36: don't modify si handle data until the new handle has been allocated
+	mov [si].XMS_HANDLE.xh_sizeK, edx
+	add edx,[si].XMS_HANDLE.xh_baseK ; calculate new base address
+endif
 	pushf
 	cli
 	push bx
 	call xms_alloc_handle			 ; alloc a handle in BX, size EDI
 	jc @@ext_no_xms_handles_left	 ; return if there's an error
+if 1; v3.36: don't modify si handle data until the new handle has been allocated
+	mov [si].XMS_HANDLE.xh_sizeK, edx
+	add edx,[si].XMS_HANDLE.xh_baseK ; calculate new base address
+endif
 	mov [bx].XMS_HANDLE.xh_baseK, edx
 	mov [bx].XMS_HANDLE.xh_sizeK, edi
 if 1;v3.35
