@@ -1,6 +1,12 @@
 
   History
 
+  10/29/2020, v3.36:
+  - bugfix: block moves >= 2GB failed due to signed comparison.
+  - remove unused and undocumented option /INT15:xx.
+  - removed useless option /NOX2MAX32.
+  - cleaned source code.
+
   04/16/2020, v3.35:
   - realloc emb will try to grow the emb "in-place" if possible. This is
     similiar to what MS Himem does.

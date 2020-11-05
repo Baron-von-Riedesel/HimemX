@@ -7,36 +7,9 @@
 ; major rework by tom ehlert.
 ; modified for >64M support, Michael Devore
 ;
-; If you would like to use parts of this driver in one of your projects, please
-; check up with me first.
-;
-; I can be reached at:  Till.Gerken@ngosub0.ngo.ol.ni.schule.de (Internet)
-;           2:2426/2190.16 (FidoNet)
-;
-; For questions concerning Free-DOS, mail the coordinator
-; Morgan "Hannibal" Toal <hannibal@iastate.edu>
-;
 ; Comments and bug reports are always appreciated.
 ;
-; Copyright (c) 1995, Till Gerken
-;******************************************************************************
-; -- ORIGINAL IMPLEMENTATION NOTES --
-;
-; - The Protected Mode handling is very simple, it fits only for the least
-;   needs
-; - I didn't care about reentrancy. If this thing should be used in
-;   Multitasking Environments, well, somebody got to take a look at the code.
-; - INT15h, Func. 87h (Move Block) has been re-implemented to preserve
-;   the state of A20. (very slow!)
-; - INT15h, Func. 88h (Extended Memory Size) has been re-implemented to
-;   return 0.
-; - Function 0Bh (Move Block) uses it's own Protected Mode handling.
-;   It doesn't provide Interrupt windows.
-; - The code is not very optimised, I just wrote it down for now. Later, when
-;   everything is tested, I'm going to see what can be done
-; - Some ideas were taken from the original XMS driver written by
-;   Mark E. Huss (meh@bis.adp.com), but everything has been completely
-;   rewritten, so if there are bugs, they are mine, not his. ;)
+; Parts copyright (c) 1995, Till Gerken
 ;******************************************************************************
 ; -- NEW IMPLEMENTATION NOTES --
 ;
@@ -87,16 +60,20 @@
 ;       - v3.34: added multiple int 15h, ax=e820h memory block support
 ;       - v3.35: added alternative (re)alloc strategy (HimemX2).
 ;                see Readme.txt & History.txt for details.
+;       - v3.36: signed comparison in block move made moves >= 2 GB buggy;
+;                minor bug in HimemX, since it's very unlikely that such
+;                large moves occured, but needed for HimemSX.
 
 ;--- assembly time parameters
 
-VERSIONSTR		equ <'3.35'>
-DRIVER_VER		equ 300h+35
+VERSIONSTR		equ <'3.36'>
+DRIVER_VER		equ 300h+36
 INTERFACE_VER	equ 300h
 
 ifndef NUMHANDLES
 NUMHANDLES      equ 48      ;std 48, default number of handles
 endif
+MAXHANDLES      equ 128     ;std 128, max number of handles
 ALLOWDISABLEA20 equ 1       ;std 1, 1=allow to disable A20
 BLOCKSIZE       equ 2000h   ;std 2000h, block size moved to/from ext. memory
 USEUNREAL       equ 1       ;std 1, 1=use "unreal" mode for EMB copy
@@ -112,9 +89,6 @@ endif
 MAXFREEKB       equ 0FFFFh  ;std FFFFh, xms v2.0 max ext. memory
 
 ;--- constants
-
-EXECMODE_SYS    equ 0       ;binary has been loaded as device
-EXECMODE_EXE    equ 1       ;binary has been loaded as .EXE
 
 XMS_START       equ 1024+64 ; XMS starts at 1088k after HMA
 
@@ -318,9 +292,6 @@ hma_exists				db 0
 ;--- constants
 
 szStartup   	DB 'HimemX ', VERSIONSTR, ' [', @CatStr(!"%@Date!"), '] (c) 1995 Till Gerken, 2001-2006 tom ehlert',  0aH,  00H
-szQuestion		DB '/?',  00H
-szCannot		DB 'Option /? cannot be used as a device driver.',  0aH, 'Please'
-				DB ' run HimemX /? from the commandline',  00H
 if ?TESTMEM
 szTESTMEMOFF	DB '/TESTMEM:OFF',  00H
 endif
@@ -332,10 +303,9 @@ szINTERFACE		DB 'Interface : XMS 3.00 80386 4G ',  0aH,  00H
 szNUMHANDLES	DB '/NUMHANDLES=',  00H
 szSelNumHandles	DB 'selected num_handles=%d',  0aH,  00H
 szNumHandlesLim1	DB 'HimemX: NUMHANDLES must be >= 8, corrected',  0aH,  00H
-szNumHandlesLim2	DB 'HimemX: NUMHANDLES must be <= 128, corrected',  0aH,  00H
+szNumHandlesLim2	DB 'HimemX: NUMHANDLES must be <= ',@CatStr(!",%MAXHANDLES,!"),', corrected',  0aH,  00H
 szNOABOVE16		DB '/NOABOVE16',  00H
 szX2MAX32		DB '/X2MAX32',  00H
-szNOX2MAX32		DB '/NOX2MAX32',  00H
 szX				DB '/X',  00H
 szMETHOD		DB '/METHOD:',  00H
 szMAX			DB '/MAX=',  00H
@@ -343,8 +313,6 @@ szMaximum		DB 'Maximum XMS: %luK',  0aH,  00H
 szHMAMIN		DB '/HMAMIN=',  00H
 szMinimum		DB 'Minimum HMA that has to be requested: %uK',  0aH,  00H
 szHMAMAX		DB 'HimemX: HMAMIN must be <= 63, corrected',  0aH,  00H
-szINT151		DB '/INT15=',  00H
-szINT152		DB 'HimemX: /INT15=%x - not implemented',  07H,  0aH,  00H
 szignored		DB 'ignored commandline <%s>',  0aH,  00H
 ;cant_disable_message db 'Can',27h,'t disable A20 - ignored',0dh,0ah,'$'
 
@@ -395,7 +363,7 @@ szHello label byte
 	db "HimemX is a device driver that is loaded in CONFIG.SYS.",10
 	db "Please place DEVICE=HIMEMX.EXE [options] before any driver using XMS.",10,10
 	db "options: [/MAX=####] [/METHOD:xxx] [/HMAMIN=n] [/NUMHANDLES=m]",10
-	db ?TMSTR," [/VERBOSE] [/NOABOVE16] [/X]",?LGSTR,10,10
+	db ?TMSTR," [/VERBOSE] [/NOABOVE16] [/X] [/X2MAX32]",?LGSTR,10,10
 	db "  /MAX=#####      limit memory controlled by XMM to #####K.",10
 	db "                  The HMA is not affected by this value, it's always included",10
 	db "  /METHOD:xxx     Specifies the method to be used for A20 handling.",10
@@ -408,8 +376,7 @@ szHello label byte
 	db "                  PORT92      Use port 92h always",10
 	db "  /HMAMIN=n       Specifies minimum number of Kbs of HMA that a program",10
 	db "                  must request to gain access to the HMA (default: 0Kb)",10
-	db "  /NOX2MAX32      No limit for XMS 2.0 free/avail. memory reports (default)",10
-	db "  /NUMHANDLES=m   Specifies number of XMS handles available (def: 48)",10
+	db "  /NUMHANDLES=m   Number of XMS handles (default: 48, min: 8, max: 128)",10
 if ?TESTMEM
 	db "  /TESTMEM:ON|OFF Performs or skips an extended memory test (def: OFF)",10
 endif
@@ -1335,7 +1302,8 @@ endif
 @@copy_loop:
 	mov ecx,edx
 	cmp ecx,BLOCKSIZE
-	jle @F
+;	jle @F						;27.10.2020: no signed compare here!
+	jbe @F
 	mov ecx,BLOCKSIZE
 @@:
 	sub edx,ecx
@@ -1653,7 +1621,7 @@ xms_ext_get_handle_info endp
 xms_get_handle_info proc
 
 	push cx
-	push edx
+	push edx  ;save Hiword(edx)
 	pop dx
 	@DbgOutS <"xms_get_handle_info enter",13,10>
 
@@ -1661,12 +1629,17 @@ xms_get_handle_info proc
 	or ax,ax
 	jz @@get_handle_info_err
 
+;--- free handles is returned in BL
 	cmp ch,0					; bl = min(cx,0xff)
 	jz @@handle_count_ok
 	mov cl,0ffh
 @@handle_count_ok:
 	mov bl,cl
 
+;--- the size is returned in 16-bit register DX
+;--- if it's larger than 65535, 65535 is returned.
+;--- MS Himem behaves differently, it returns AX=0
+;--- and BL=A2 (invalid handle).
 	cmp edx,010000h				; dx = min(edx,0xffff);
 	jb @@handle_size_ok
 	mov dx,0ffffh
@@ -1675,7 +1648,7 @@ xms_get_handle_info proc
 @@get_handle_info_err:
 
 	push dx
-	pop edx
+	pop edx   ;restore Hiword(edx)
 	pop cx
 	ret
 
@@ -2716,98 +2689,7 @@ strategy proc far
 	ret 				; far return here!
 strategy endp
 
-;******************************************************************************
-; initializes the driver. called only once!
-; may modify DI
-; In:   DS:DI - pointer to init structure
-; Out:  DS = DGROUP
-
-DoCommandline proc
-
-	mov ax,ss
-	mov dx,sp
-
-	push cs
-	pop ss
-	mov sp,offset _stacktop
-	pusha
-	push es
-	lds si,[di].init_strc.cmd_line
-@@:
-	lodsb
-	cmp al,20h
-	ja @B
-	dec si
-
-	sub sp,128
-	mov di,sp
-	push ss
-	pop es
-	mov cx,128-1
-@@nextitem2:
-	lodsb
-	cmp al,13
-	jz @@done
-	cmp al,10
-	jz @@done
-	stosb
-	and al,al
-	loopnz @@nextitem2
-@@done:
-	mov al,0
-	stosb
-	push ss
-	pop ds	;DS=DGROUP
-
-	push sp
-	push EXECMODE_SYS
-	call ParseCmdLine
-	add sp,4+128
-	pop es
-	popa
-;--- restore original stack, DOS requires it
-	mov ss,ax
-	mov sp,dx
-	ret
-
-DoCommandline endp
-
-;*********************************************
-; startpoint when executing as EXE
-;*********************************************
-
-start proc
-	push cs
-	pop ss
-	mov sp,offset _stacktop-128
-	call check_cpu			 ; do we have at least a 386?
-	jnz nota386
-	mov di,sp
-	push es
-	pop ds
-	push ss
-	pop es
-	mov si,80h
-	lodsb
-	and al,7Fh
-	movzx cx,al
-	rep movsb
-	mov al,0
-	stosb
-	push es
-	pop ds
-	mov _startup_verbose,1
-	push sp
-	push EXECMODE_EXE
-	call ParseCmdLine
-	push offset szHello
-	call _printf
-nota386:
-	mov ah,04ch
-	int 21h
-start endp
-
-handle_char proc
+print_char proc
 	pop cx
 	pop dx
 	push cx
@@ -2821,7 +2703,7 @@ handle_char proc
 	mov ah,2
 	int 21h
 	ret
-handle_char endp
+print_char endp
 
 ;--- get the A20 method ("/METHOD:xxx")
 ;--- int _stdcall GetA20Method(char * pszMethod)
@@ -2875,24 +2757,12 @@ _GetA20Method proc
 _GetA20Method endp
 
 ;--- convert long to string
-;--- _stdcall ltob(long num, char * psz, int base);
 
-_ltob proc
-
-num  equ <bp+4>
-psz  equ <bp+8>
-base equ <bp+10>
-
-;	register si = p
-
-	push bp
-	mov bp,sp
-	push edi
-	push si
+ltob proc stdcall uses edi si num:dword, psz:ptr, base:word
 
 	mov ch,0
-	movzx edi,@word [base]
-	mov eax,[num]
+	movzx edi,base
+	mov eax,num
 	cmp di,-10
 	jne @@ispositive
 	mov di,10
@@ -2901,7 +2771,7 @@ base equ <bp+10>
 	neg eax
 	mov ch,'-'
 @@ispositive:
-	mov bx,[psz]
+	mov bx,psz
 	lea si,[bx+10]
 	mov @byte [si],0
 	dec si
@@ -2924,153 +2794,134 @@ base equ <bp+10>
 @@nosign:
 	inc si
 	mov ax,si
-	pop si
-	pop edi
-	pop bp
-	ret 8
+	ret
 
-num  equ <>
-psz  equ <>
-base equ <>
+ltob endp
 
-_ltob endp
+printf proc c uses si di fmt:ptr, args:vararg
 
-_printf proc
-
-	enter 18,0
-	push di
-	push si
-
-fmt     equ <bp+4>
-flag    equ <bp-1>
-longarg equ <bp-2>
-size_   equ <bp-4>
-fill    equ <bp-6>
-szTmp   equ <bp-18>
-;	register di = args
+local flag:byte
+local longarg:byte
+local size_:word
+local fill:word
+local szTmp[12]:byte
 
 	push ds
 	pop es
-	lea di,[fmt+2]
-@@L335:
-	mov si,[fmt]
-@@FC244:
+	lea di,args
+nextfcharX:
+	mov si,fmt
+nextfchar:
 	lodsb
 	or al,al
-	je @@SC257
+	je done
 	cmp al,'%'
-	je @@I246
+	je isfspec
 	push ax
-	call handle_char
-	jmp @@FC244
+	call print_char
+	jmp nextfchar
 
-@@I246:
+isfspec:
 	xor dx,dx
 	mov [longarg],dl
 	mov bl,1
 	mov cl,' '
 	cmp @byte [si],'-'
-	jne @@I247
+	jne @F
 	dec bx
 	inc si
-@@I247:
+@@:
 	mov [flag],bl
 	cmp @byte [si],'0'
-	jne @@L355
+	jne @F
 	mov cl,'0'
 	inc si
-@@L355:
+@@:
 	mov [fill],cx
 	mov [size_],dx
 	mov bx,dx
-	jmp @@L358
-@@FC250:
+	jmp checkfordigits
+nextdigit:
 	cmp @byte [si],'9'
-	jg @@L362
+	jg digitsdone
 	lodsb
 	sub al,'0'
 	cbw
 	imul cx,bx,10       ;cx = bx * 10
 	add ax,cx
 	mov bx,ax
-@@L358:
+checkfordigits:
 	cmp @byte [si],'0'
-	jge @@FC250
-@@L362:
+	jge nextdigit
+digitsdone:
 	mov [size_],bx
 	cmp @byte [si],'l'
-	jne @@I252
+	jne @F
 	mov @byte [longarg],1
 	inc si
-@@I252:
+@@:
 	lodsb
 	mov [fmt],si
 	cbw
-	cmp al,120              ;78h
-	je @@SC264
-	ja @@SD279
+	cmp al,'x'
+	je print_x
+	ja print_qm
 	or al,al
-	je @@SC257              ;\0
-	sub al,88
-	je @@SC264
+	je done                 ;\0
+	sub al,'X'
+	je print_x
 	sub al,11
-	je @@SC258
+	je print_c
 	dec al
-	je @@SC261
+	je print_d
 	sub al,5
-	je @@SC261
+	je print_i
 	sub al,10
-	je @@SC259
+	je print_s
 	sub al,2
-	je @@SC263
-@@SD279:                      ;default
+	je print_u
+print_qm:
 	push ax
-	push 63	;'?'
-	call handle_char
-	jmp @@L359
-@@SC258:                      ;'c'
+	push '?'
+	call print_char
+	jmp @F
+print_c:
 	push @word [di]
 	add di,2
-@@L359:
-	call handle_char
-	jmp @@L335
-@@SC259:                      ;'s'
+@@:
+	call print_char
+	jmp nextfcharX
+print_s:
 	mov si,[di]
 	add di,2
-	jmp @@do_outputstring260
-@@SC264:                      ;'X' + 'x'
+	jmp print_string
+print_x:
 	mov bx,16
-	jmp @@lprt262
-@@SC261:                      ;'d' + 'i'
+	jmp print_number
+print_d:
+print_i:
 	mov bx,-10
-	jmp @@lprt262
-@@SC263:                      ;'u'
+	jmp print_number
+print_u:
 	mov bx,10
-@@lprt262:
+print_number:
 	cmp @byte [longarg],0
-	je @@I265
-	mov ax,[di+0]
-	mov dx,[di+2]
+	je @F
+	mov eax,[di+0]
 	add di,4
-	jmp @@L341
-@@I265:
-	mov ax,[di]
+	jmp print_long
+@@:
+	movzx eax,@word [di]
 	add di,2
 	cmp bx,0
-	jge @@I267
-	cwd 
-	jmp @@L341
-@@I267:
-	sub dx,dx
-@@L341:
-	push bx
+	jge @F
+	movsx eax,ax
+@@:
+print_long:
 	lea cx,[szTmp]
-	push cx
-	push dx
-	push ax
-	call _ltob
+	invoke ltob, eax, cx, bx
 	mov si,ax
-@@do_outputstring260:
+print_string:
 	push si
 	call _strlen
 	sub [size_],ax
@@ -3078,66 +2929,54 @@ szTmp   equ <bp-18>
 	jne @@L360
 	mov bx,[size_]
 	jmp @@L363
-@@F270:
+
+fillcharloop1:
 	push @word [fill]
-	call handle_char
+	call print_char
 	dec bx
 @@L363:
 	or bx,bx
-	jg @@F270
+	jg fillcharloop1
 	mov [size_],bx
 	jmp @@L360
-@@F273:
+
+charoutloopZ:
 	mov al,[si]
 	push ax
-	call handle_char
+	call print_char
 	inc si
 @@L360:
 	cmp @byte [si],0
-	jne @@F273
+	jne charoutloopZ
+
 	mov bx,[size_]
-@@F276:
+fillcharloop2:
 	or bx,bx
-	jle @@L335
+	jle nextfcharX      ;done, continue with formatstring
 	push @word [fill]
-	call handle_char
+	call print_char
 	dec bx
-	jmp @@F276
-@@SC257:
+	jmp fillcharloop2
+done:
 	xor ax,ax
-	pop si
-	pop di
-	leave
 	ret
 
-fmt     equ <>
-flag    equ <>
-longarg equ <>
-size_   equ <>
-fill    equ <>
-szTmp   equ <>
+printf endp
 
-_printf endp
 
-;--- char * _stdcall skipWhite(char * pszString)
 ;--- skip "white space" characters
 
 _skipWhite proc
-	pop cx
-	pop bx
-	push cx
-@@nextitem:
-	cmp @byte [bx],' '
-	je @@FB286
-	cmp @byte [bx],9
-	jne @@FB285
-@@FB286:
-	inc bx
-	jmp @@nextitem
-@@FB285:
-	mov ax,bx
+nextitem:
+	cmp @byte [si],' '
+	je @F
+	cmp @byte [si],9
+	jne done
+@@:
+	inc si
+	jmp nextitem
+done:
 	ret
-
 _skipWhite endp
 
 ;--- int _stdcall strlen(char * pszString)
@@ -3159,17 +2998,13 @@ _strlen proc
 	ret
 _strlen endp
 
-;--- int _cdecl _memicmp(char * psz1, char * psz2, int len);
 ;--- must preserve BX!
 
-__memicmp proc
-	push bp
-	mov bp,sp
-	push di
-	push si
-	mov cx,[bp+8]
-	mov si,[bp+6]
-	mov di,[bp+4]
+_memicmp proc c uses si di psz1:word, psz2:word, len:word
+
+	mov cx,len
+	mov si,psz2
+	mov di,psz1
 	cld
 @@nextitem:
 	lodsb
@@ -3180,11 +3015,8 @@ __memicmp proc
 	sub al,ah
 	loopz @@nextitem
 	cbw
-	pop si
-	pop di
-	pop bp
 	ret
-__memicmp endp
+_memicmp endp
 
 ;--- _stdcall toupper(char) returns uppercase character
 
@@ -3202,38 +3034,26 @@ _toupper proc
 
 _toupper endp
 
-;--- DWORD _stdcall GetValue(commandline, base, usesuffix)
-;--- converts a string into a DWORD
+;--- convert a string into a DWORD, returned in EAX
+;--- also accept suffix G, M, K and adjust value then
 
-_GetValue proc
-	push bp
-	mov bp,sp
-	push di
-	push esi
+GetValue proc stdcall uses esi di commandline:word, base:word, usesuffix:word
 
-commandline equ <bp+4>
-base equ <bp+6>
-usesuffix equ <bp+8>
-;	register di = len
-;	register esi = result
-
-	xor di,di
 	xor esi, esi			;result
-@@F314:
-	mov bx,@word [commandline]
-	mov al,@byte [bx][di]
-	push ax
-	call _toupper
+	mov bx,commandline
+nextchar:
+	mov al,@byte [bx]
 	cmp al,'0'
-	jl @@I317
+	jb @F
 	cmp al,'9'
-	jg @@I317
+	ja @F
 	sub al,'0'
 	jmp @@I318
-@@I317:
+@@:
+	call _toupper
 	cmp al,'A'
 	jl @@FB316
-	sub al,55	;0037H
+	sub al,55	;'A' -> 10
 @@I318:
 	movzx ecx, @word [base]
 	cmp cl,al
@@ -3243,35 +3063,31 @@ usesuffix equ <bp+8>
 	xchg eax,esi
 	movzx eax,al
 	add esi,eax
-	inc di
-	jmp @@F314
+	inc bx
+	jmp nextchar
 
 @@FB316:
-	mov bx,[commandline]
-	add bx,di
 	cmp @byte [usesuffix],0
 	je @@I322
 	mov al,[bx]
-	push ax
 	call _toupper
-	cmp al,77	;004dH
-	je @@SC328
-	ja @@I322
-	sub al,71	;0047H
-	je @@SC327
-	sub al,4
-	je @@SC329
+	cmp al,'M'
+	je is_mega
+	cmp al,'G'	;'G'
+	je is_giga
+	cmp al,'K'
+	je is_kilo	;'K'
 	jmp @@I322
-@@SC327:
+is_giga:
 	shl esi,10
-@@SC328:
+is_mega:
 	shl esi,10
-@@SC329:
+is_kilo:
 	mov @byte [bx],' '
 @@I322:
 	push esi
 	mov si,bx
-	mov di,[commandline]
+	mov di,commandline
 	push ds
 	pop es
 @@nextchar:
@@ -3279,18 +3095,10 @@ usesuffix equ <bp+8>
 	stosb
 	and al,al
 	jnz @@nextchar
-	pop ax
-	pop dx
-	pop esi
-	pop di
-	pop bp
-	ret 3*2
+	pop eax
+	ret
 
-commandline equ <>
-base equ <>
-usesuffix equ <>
-
-_GetValue endp
+GetValue endp
 
 ;--- char * _stdcall FindCommand(char * pszSearchString)
 ;--- parses the command line for a specific command.
@@ -3313,11 +3121,7 @@ _FindCommand proc
 @@F299:
 	cmp @byte [si],0
 	je @@FB301
-	push bx
-	push di
-	push si
-	call __memicmp
-	add sp,6
+	invoke _memicmp, si, di, bx
 	or ax,ax
 	je @@L384
 	inc si
@@ -3344,42 +3148,21 @@ _FindCommand proc
 
 _FindCommand endp
 
-;--- ParseCmdLine(mode, pszCmdLine)
+;--- ParseCmdLine()
+;--- in DS:SI -> cmdline
 
 ParseCmdLine proc
 
-	push bp
-	mov bp,sp
-	push di
-	push si
 	@DbgOutS <"ParseCmdLine enter",13,10>
 
-mode equ <bp+4>
-pszCmdLine equ <bp+6>
+	invoke printf, offset szStartup
 
-	mov di,[mode]
-	mov si,[pszCmdLine]
-	push offset szStartup
-	call _printf
-	pop bx
-
-	push offset szQuestion	;/?
-	call _FindCommand
-	or ax,ax
-	je @F
-	or di,di
-	jne @F
-	push offset szCannot	;option cannot be used as a device driver
-	call _printf
-	pop bx
-@@:
 if ?TESTMEM
 	push offset szTESTMEMOFF
 	call _FindCommand
 	or ax,ax
 	jne @F
-	push offset szQuestion
-	call _FindCommand
+;--- do something usefull here
 @@:
 endif
 
@@ -3399,184 +3182,163 @@ if ?LOG
 endif
 	cmp _startup_verbose,0
 	je @F
-	push offset szINTERFACE
-	call _printf
-	pop bx
+	invoke printf, offset szINTERFACE
 @@:
 
+;--- option /NUMHANDLES
 	push offset szNUMHANDLES
 	call _FindCommand
 	or ax,ax
-	je @@I245
-
-	push 0
-	push 10
-	push ax
-	call _GetValue
+	je no_numhandles
+	invoke GetValue, ax, 10, 0
 	mov _xms_num_handles,ax
 	cmp _startup_verbose,0
-	je @@I2471
-
-	push ax
-	push offset szSelNumHandles
-	call _printf
-	add sp,4
-
-@@I2471:
+	je @F
+	invoke printf, offset szSelNumHandles, ax
+@@:
 	cmp _xms_num_handles,8
-	jae @@I249
-
-	push offset szNumHandlesLim1
-	call _printf
-	pop bx
-
+	jae @F
+	invoke printf, offset szNumHandlesLim1
 	mov _xms_num_handles,8
-@@I249:
-	cmp _xms_num_handles,128
-	jbe @@I245
+@@:
+	cmp _xms_num_handles,MAXHANDLES
+	jbe @F
+	invoke printf, offset szNumHandlesLim2
+	mov _xms_num_handles,MAXHANDLES
+@@:
+no_numhandles:
 
-	push offset szNumHandlesLim2
-	call _printf
-	pop bx
-
-	mov _xms_num_handles,128
-@@I245:
-
+;--- option /NOABOVE16
 	push offset szNOABOVE16
 	call _FindCommand
-
 	or ax,ax
-	je @@I253
+	je @F
 	mov _no_above_16,1
-@@I253:
+@@:
 
+;--- option /X2MAX32
 	push offset szX2MAX32
 	call _FindCommand
 	or ax,ax
-	je @@I255
+	je @F
 	mov _x2max32,32767	;7fffH
-@@I255:
+@@:
 
-	push offset szNOX2MAX32
-	call _FindCommand
-	or ax,ax
-	je @@I257
-	mov _x2max32,-1	;ffffH
-@@I257:
-
+;--- option /X
 	push offset szX
 	call _FindCommand
 	or ax,ax
-	je @@I259
+	je @F
 	mov _x_option,1
-@@I259:
+@@:
 
+;--- option /METHOD
 	push offset szMETHOD
 	call _FindCommand
 	or ax,ax
-	je @@I261
-
+	je @F
 	push ax
 	call _GetA20Method
-
 	mov _method,al
-@@I261:
+@@:
 
+;--- option /MAX=
 	push offset szMAX
 	call _FindCommand
 	or ax,ax
-	je @@I263
-
-	push 1
-	push 10
-	push ax
-	call _GetValue
-
-	mov @word [_xms_max+0],ax
-	mov @word [_xms_max+2],dx
+	je @F
+	invoke GetValue, ax, 10, 1
+	mov [_xms_max],eax
 	cmp _startup_verbose,0
-	je @@I263
+	je @F
+	invoke printf, offset szMaximum, eax
+@@:
 
-	push dx
-	push ax
-	push offset szMaximum
-	call _printf
-	add sp,6
-
-@@I263:
-
+;--- option /HMAMIN=
 	push offset szHMAMIN
 	call _FindCommand
 	or ax,ax
-	je @@I267X
-
-	push 1
-	push 10
-	push ax
-	call _GetValue
-
+	je no_hmamin
+	invoke GetValue, ax, 10, 1
 	mov _hma_min,ax
 	cmp _startup_verbose,0
-	je @@I269
-
-	push ax
-	push offset szMinimum
-	call _printf
-	add sp,4
-
-@@I269:
+	je @F
+	invoke printf, offset szMinimum, ax
+@@:
 	cmp _hma_min,63
-	jbe @@I271
-
-	push offset szHMAMAX
-	call _printf
-	pop bx
-
+	jbe @F
+	invoke printf,offset szHMAMAX
 	mov _hma_min,63
-@@I271:
+@@:
 	shl _hma_min,10
-@@I267X:
+no_hmamin:
 
-	push offset szINT151
-	call _FindCommand
-	or ax,ax
-	je @@I273
-
-	push 0
-	push 16
-	push ax
-	call _GetValue
-
-	push ax
-	push offset szINT152
-	call _printf
-	add sp,4
-
-@@I273:
-	push si
 	call _skipWhite
-
-	mov si,ax
 	cmp @byte [si],0
-	je @@I276
+	je @F
+	invoke printf, offset szignored, si
+@@:
 
-	push ax
-	push offset szignored
-	call _printf
-	add sp,4
-
-@@I276:
 	@DbgOutS <"ParseCmdLine exit",13,10>
 	xor ax,ax
-	pop si
-	pop di
-	pop bp
 	ret
 
-mode equ <>
-pszCmdLine equ <>
-
 ParseCmdLine endp
+
+;******************************************************************************
+; initializes the driver. called only once!
+; may modify DI
+; In:   DS:DI - pointer to init structure
+; Out:  DS = DGROUP
+
+DoCommandline proc
+
+	mov ax,ss
+	mov dx,sp
+
+	push cs
+	pop ss
+	mov sp,offset _stacktop
+	pusha
+	push es
+	lds si,[di].init_strc.cmd_line
+@@:
+	lodsb
+	cmp al,20h
+	ja @B
+	dec si
+
+	sub sp,128
+	mov di,sp
+	push ss
+	pop es
+	mov cx,128-1
+@@nextitem2:
+	lodsb
+	cmp al,13
+	jz @@done
+	cmp al,10
+	jz @@done
+	stosb
+	and al,al
+	loopnz @@nextitem2
+@@done:
+	mov al,0
+	stosb
+	push ss
+	pop ds	;DS=DGROUP
+
+	mov si,sp
+	call ParseCmdLine
+	add sp,128
+	pop es
+	popa
+;--- restore original stack, DOS requires it
+	mov ss,ax
+	mov sp,dx
+	ret
+
+DoCommandline endp
 
 dispmsg proc
 	push cs
@@ -3760,7 +3522,8 @@ initialize proc
 @@error_exit:
 	call dispmsg
 	mov dx,offset error_msg
-	call dispmsg
+	mov ah,9
+	int 21h
 	popad
 	popf
 	ret
@@ -3840,7 +3603,7 @@ endif
 ; we clear the handle table, as this may overwrite part of the code above
 ; but must not erase itself
 
-IF ($ - startoftext) le 128 * sizeof XMS_HANDLE
+IF ($ - startoftext) le MAXHANDLES * sizeof XMS_HANDLE
 
 	.err <this is an error! reserve some space after driver end ~!!>
 
@@ -3922,6 +3685,23 @@ init_interrupt proc far
 	ret
 init_interrupt endp
 
+;--- startpoint when executing as EXE
+
+startexe proc
+	cld
+	mov si,offset szHello
+nextchar:
+	lodsb cs:[si]
+	and al,al
+	jz done
+	push ax
+	call print_char
+	jmp nextchar
+done:
+	mov ah,04ch
+	int 21h
+startexe endp
+
 _TEXT ends
 
-	end start
+	end startexe
