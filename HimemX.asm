@@ -66,8 +66,8 @@
 
 ;--- assembly time parameters
 
-VERSIONSTR		equ <'3.36'>
-DRIVER_VER		equ 300h+36
+VERSIONSTR		equ <'3.37'>
+DRIVER_VER		equ 300h+37
 INTERFACE_VER	equ 300h
 
 ifndef NUMHANDLES
@@ -1263,15 +1263,15 @@ endif
 	or ecx,ecx 				; nothing to do ??
 	jz @@xms_exit_copy
 
-	cmp esi,edi 			; nothing to do ??
-	jz @@xms_exit_copy
-
+	cmp esi,edi
+;	jz @@xms_exit_copy	 ;11/2020: don't exit if src=dst
 
 ;
-; if source is greater the destination, it's ok
+; if source >= destination, it's ok
 ; ( at least if the BIOS, too, does it with CLD)
 
-	ja @@move_ok_to_start
+;	ja @@move_ok_to_start
+	jae @@move_ok_to_start
 
 ;
 ; no, it's less
@@ -1405,10 +1405,10 @@ endif
 
 else
 
+  if 0
 	pushf
 	cli 					; no interrupts during the block move
 	pushf
-	mov dx,data32sel		; activate "unreal" mode. This has to be done
 	call set_ureal			; every time since the mode might have been
 	xor dx,dx				; exited by an interrupt routine.
 	mov ds,dx
@@ -1421,14 +1421,15 @@ else
 	nop 					; don't remove - some 80386s were buggy
 	popf
 	jnz @F
+	mov dx,data16sel
 	call reset_ureal
 @@:
 	popf
 	ret
 
-reset_ureal:    
-	mov dx,data16sel
-set_ureal:
+set_ureal:    
+	mov dx,data32sel
+reset_ureal:
 if PREF66LGDT
 	db 66h					; load full 32bit base
 endif
@@ -1445,6 +1446,48 @@ endif
 	mov es,dx
 	mov cr0,eax
 	ret
+  else
+;--- set int 0dh, then just start to copy.
+;--- if int 0dh is called, an exception occured, since IRQs are disabled.
+;--- then set unreal mode inside int 0dh code.
+	xor dx,dx
+	mov ax,cs
+	mov ds,dx
+	mov es,dx
+	pushf
+	shl eax,16
+	mov ax,offset myint0d
+	shr ecx,2				; get number of DWORDS to move
+	cli
+	xchg eax,ds:[13*4]
+	rep movs @dword [edi],[esi]
+	adc cx,cx
+	rep movs @word [edi],[esi]	 ; move a trailing WORD
+	db 67h					; don't remove - some 80386s were buggy
+	nop 					; don't remove - some 80386s were buggy
+	mov ds:[13*4],eax		; restore int 0dh
+	popf
+	ret
+myint0d:
+	push ds
+	push es
+	push eax
+	lgdt fword ptr cs:[gdt32]; load GDTR (use CS prefix here)
+	mov eax,cr0
+	inc ax					; set PE bit
+	mov cr0,eax
+	jmp @F
+@@:
+	mov dx,data32sel
+	dec ax					; clear PE bit
+	mov ds,dx
+	mov es,dx
+	mov cr0,eax
+	pop eax
+	pop es
+	pop ds
+	iret
+  endif
 
 endif
 
@@ -3688,16 +3731,10 @@ init_interrupt endp
 ;--- startpoint when executing as EXE
 
 startexe proc
-	cld
-	mov si,offset szHello
-nextchar:
-	lodsb cs:[si]
-	and al,al
-	jz done
-	push ax
-	call print_char
-	jmp nextchar
-done:
+	push cs
+	pop ds
+	invoke printf, offset szStartup
+	invoke printf, offset szHello
 	mov ah,04ch
 	int 21h
 startexe endp

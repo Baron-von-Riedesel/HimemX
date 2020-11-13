@@ -1,6 +1,9 @@
 
   History
 
+  __/__/2020, v3.37:
+  - block move routine speed-up.
+
   10/29/2020, v3.36:
   - bugfix: block moves >= 2GB failed due to signed comparison.
   - remove unused and undocumented option /INT15:xx.
