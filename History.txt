@@ -3,6 +3,7 @@
 
   __/__/2020, v3.37:
   - block move routine speed-up.
+  - return DX=0 if emb allocation fails (XMS spec).
 
   10/29/2020, v3.36:
   - bugfix: block moves >= 2GB failed due to signed comparison.

@@ -84,6 +84,7 @@ ifndef ?ALTSTRAT
 ?ALTSTRAT       equ 0       ;std 0, 1=use alternate strategie for (re)alloc emb
 endif
 ?MERGE0HDL      equ 1       ;std 0, 1=try to merge even if handle to free has size 0
+?ALLOCDX0       equ 1       ;std 1, 1=return DX=0 if alloc fails
 
 ;MAXFREEKB      equ 0FBC0h
 MAXFREEKB       equ 0FFFFh  ;std FFFFh, xms v2.0 max ext. memory
@@ -961,6 +962,7 @@ xms_query_free_mem endp
 ; Out:  AX=1 if successful
 ;     DX=handle
 ;   AX=0 if not successful
+;     DX=0 (according to XMS docs)
 ;     BL=080h -> function not implemented
 ;     BL=081h -> VDISK is detected
 ;     BL=0a0h -> all XMS is allocated
@@ -1005,6 +1007,9 @@ endif
 	popf
 	pop cx
 	pop edx
+if ?ALLOCDX0
+	xor dx,dx  ;return DX=0 if alloc fails
+endif
 	xor ax,ax
 	ret
 @@nullhandle:
