@@ -505,7 +505,7 @@ test_a20 endp
 enable_a20 proc
 	push ax
 	mov ah,2
-	jmp short disable_enable_a20
+	jmp disable_enable_a20
 enable_a20 endp
 
 disable_a20 proc
@@ -523,7 +523,7 @@ disable_enable_a20 proc	;patch area
 ; since this is replaceable, we need to bulk up the space allocated for it
 ;  for larger replacement routines
 
-	DB 60-2 DUP (?)
+	DB 42-2 DUP (?)
 
 size_disable_enable_a20 equ $ - disable_enable_a20
 
@@ -1227,10 +1227,10 @@ xms_move_emb proc
 	@DbgOutS <"xms_move_emb enter",13,10>
 IF ALLOWDISABLEA20
 	call test_a20				; get A20 state
-	jnz @@was_enabled
+	jnz @F
 	call enable_a20 			; now enable it! - if it was disabled
-	push offset disable_a20		; and make sure it is disabled on exit			
-@@was_enabled:
+	push offset disable_a20		; and make sure it is disabled on exit
+@@:
 endif
 	xor ax,ax					; default to error
 	push ecx
@@ -1883,7 +1883,7 @@ xms_realloc_emb proc
 	call xms_ext_realloc_emb
 	push bx 						; recover top 16 bit of ebx
 	pop ebx
-	ret									
+	ret
 
 xms_realloc_emb endp
 
@@ -2266,6 +2266,7 @@ Sync8042:
 	and al,2
 	loopnz @@InSync
 	ret
+
 size_disable_enable_a20_KBC equ $ - disable_enable_a20_KBC
 
 disable_enable_a20_KBC endp
@@ -2512,131 +2513,14 @@ detect_and_handle_test endp
 
 ; reserve size of routine checks
 
-A20MAX = 0
-
-IF A20MAX lt size_disable_enable_a20_fast
-A20MAX = size_disable_enable_a20_fast
-ENDIF
-
-IF A20MAX lt size_disable_enable_a20_BIOS
-A20MAX = size_disable_enable_a20_BIOS
-ENDIF
-
-IF A20MAX lt size_disable_enable_a20_KBC
-A20MAX = size_disable_enable_a20_KBC
-ENDIF
-
-;--- @display %A20MAX
-
-if 0;A20MAX gt size_disable_enable_a20
-	.err <disable_enable_a20 too short, increase! >
+if size_disable_enable_a20_fast gt size_disable_enable_a20
+	.err <disable_enable_a20_fast too long, increase buffer! >
 endif
-
-if 0
-
-; KBC method
-; entry: ah == 0 A20 turn off, ah == 2 turn on, ax on stack
-
-disable_enable_a20_KBC:
-	pushf
-	cli				; shut off interrupts while we twiddle
-
-	call cs:[delay2ptr]
-	mov al,0d0h		; 8042 read output port
-	out 64h,al		; issue to command register
-
-deaa_loop:
-	in al,64h      ; read status register
-	test al,1       ; check if output buffer full
-	jz deaa_loop
-
-	in al,60h		; read data register
-	or ah,ah		; check enable/disable request
-	jne deaa_enable
-	and al,NOT 2	; turn off A20 bit to disable
-	jmp deaa_write
-
-deaa_enable:
-	or al,ah		; turn on A20 bit to enable
-
-deaa_write:
-	push ax		; save bit status
-	call cs:[delay2ptr]
-	mov al,0d1h		; 8042 write output port
-	out 64h,al		; issue to command register
-	call cs:[delay2ptr]
-	pop ax			; restore bit status
-	out 60h,al		; issue to data register
-	call cs:[delay2ptr]
-
-	mov al,0ffh		; pulse output port (delay for A20)
-	out 64h,al
-	call cs:[delay2ptr]
-
-	popf
-
-	pop ax
-	ret
-
-disable_enable_a20_KBC_end:
-
-;DisableA20PS2:
-;    in  al,92h ; 
-;    and al,not 2   ; switch off
-;    out 92h,al
-;                ; wait until it gets off
-;    xor cx,cx
-;disableps2wait:
-;    in  al,92h
-;    test al,2
-;    loopnz disableps2wait
-;    ret
-
-;DisableA20PS2End:
-
-
-MsgPS2Detected        db '- trying PS/2 maschine',0dh,0ah,'$'
-
-detect_and_handle_PS2 proc 
-;        mov ah,0C0h
-;        stc
-;        int 15h
-;        jc  noPS2
-
-;        or ah,ah
-;        jnz noPS2
-
-;        test   [byte es:bx+5],2 ; feature byte 1, bus is microchannel
-;        jz NoPS2
-
-
-	mov dx,offset MsgPS2Detected
-	call dispmsg
-
-	cld
-
-                                    ; copy PS2 handler into place       
-
-IF disable_enable_a20_PS2_end - disable_enable_a20_PS2 gt disable_enable_a20_end-disable_enable_a20
-    .err <this is an error! reserve some space>
-ENDIF                                                        
-	push cs
-	pop  es
-
-	mov di, offset disable_enable_a20
-	mov si, offset disable_enable_a20_PS2
-	mov cx, offset disable_enable_a20_PS2_end - offset disable_enable_a20_PS2
-	rep movsb
-
-	clc			; flag success
-	ret
-
-noPS2:
-	stc			; flag failure
-	ret
-
-detect_and_handle_PS2 endp
-
+if size_disable_enable_a20_BIOS gt size_disable_enable_a20
+	.err <disable_enable_a20_BIOS too long, increase buffer! >
+endif
+if size_disable_enable_a20_KBC gt size_disable_enable_a20
+	.err <disable_enable_a20_KBC too long, increase buffer! >
 endif
 
 ;--- set the a20 enable/disable code in the resident part
@@ -2672,6 +2556,7 @@ seta20method proc
 	mov dx,offset szA20
 	mov ah,9
 	int 21h
+	mov _method,A20_ALWAYSON
 	jmp @@got_type
 
 @@check_A20_method:
@@ -2799,14 +2684,16 @@ _GetA20Method proc
 @@done:
 	mov ax,bx
 	pop di
-	pop	si
+	pop si
 	ret
 
 _GetA20Method endp
 
 ;--- convert long to string
+;--- assume SS!=DS
+;--- assume psz onto stack!
 
-ltob proc stdcall uses edi si num:dword, psz:ptr, base:word
+ltob proc stdcall uses edi num:dword, psz:ptr, base:word
 
 	mov ch,0
 	movzx edi,base
@@ -2820,9 +2707,9 @@ ltob proc stdcall uses edi si num:dword, psz:ptr, base:word
 	mov ch,'-'
 @@ispositive:
 	mov bx,psz
-	lea si,[bx+10]
-	mov @byte [si],0
-	dec si
+	add bx,10
+	mov @byte ss:[bx],0
+	dec bx
 @@nextdigit:
 	xor edx, edx
 	div edi
@@ -2831,17 +2718,17 @@ ltob proc stdcall uses edi si num:dword, psz:ptr, base:word
 	jbe @@isdigit
 	add dl,7+20h
 @@isdigit:
-	mov [si],dl
-	dec si
+	mov ss:[bx],dl
+	dec bx
 	and eax, eax
 	jne @@nextdigit
 	cmp ch,0
 	je @@nosign
-	mov [si],ch
-	dec si
+	mov ss:[bx],ch
+	dec bx
 @@nosign:
-	inc si
-	mov ax,si
+	inc bx
+	mov ax,bx
 	ret
 
 ltob endp
@@ -2854,8 +2741,6 @@ local size_:word
 local fill:word
 local szTmp[12]:byte
 
-	push ds
-	pop es
 	lea di,args
 nextfcharX:
 	mov si,fmt
@@ -2868,8 +2753,12 @@ nextfchar:
 	push ax
 	call print_char
 	jmp nextfchar
+done:
+	xor ax,ax
+	ret
 
 isfspec:
+	push nextfcharX
 	xor dx,dx
 	mov [longarg],dl
 	mov bl,1
@@ -2910,39 +2799,28 @@ digitsdone:
 @@:
 	lodsb
 	mov [fmt],si
-	cbw
 	cmp al,'x'
 	je print_x
-	ja print_qm
-	or al,al
-	je done                 ;\0
-	sub al,'X'
+	cmp al,'X'
 	je print_x
-	sub al,11
+	cmp al,'c'
 	je print_c
-	dec al
+	cmp al,'d'
 	je print_d
-	sub al,5
+	cmp al,'i'
 	je print_i
-	sub al,10
-	je print_s
-	sub al,2
+	cmp al,'u'
 	je print_u
-print_qm:
-	push ax
-	push '?'
-	call print_char
+	cmp al,'s'
+	je print_s
+	push '%'
 	jmp @F
 print_c:
-	push @word [di]
+	push @word ss:[di]
 	add di,2
 @@:
 	call print_char
-	jmp nextfcharX
-print_s:
-	mov si,[di]
-	add di,2
-	jmp print_string
+	retn
 print_x:
 	mov bx,16
 	jmp print_number
@@ -2955,23 +2833,38 @@ print_u:
 print_number:
 	cmp @byte [longarg],0
 	je @F
-	mov eax,[di+0]
+	mov eax,ss:[di]
 	add di,4
 	jmp print_long
 @@:
-	movzx eax,@word [di]
+	movzx eax,@word ss:[di]
 	add di,2
 	cmp bx,0
 	jge @F
 	movsx eax,ax
 @@:
 print_long:
-	lea cx,[szTmp]
+	lea cx,szTmp
 	invoke ltob, eax, cx, bx
 	mov si,ax
+	push ds
+	push ss
+	pop ds
+	call print_string
+	pop ds
+	retn
+
+print_s:
+	mov si,ss:[di]
+	add di,2
+
 print_string:
-	push si
-	call _strlen
+	mov ax,si
+	.while byte ptr [si]
+		inc si
+	.endw
+	sub si,ax
+	xchg ax,si
 	sub [size_],ax
 	cmp @byte [flag],1
 	jne @@L360
@@ -3000,14 +2893,13 @@ charoutloopZ:
 	mov bx,[size_]
 fillcharloop2:
 	or bx,bx
-	jle nextfcharX      ;done, continue with formatstring
+	jle @F
 	push @word [fill]
 	call print_char
 	dec bx
 	jmp fillcharloop2
-done:
-	xor ax,ax
-	ret
+@@:
+	retn
 
 printf endp
 
@@ -3026,25 +2918,6 @@ nextitem:
 done:
 	ret
 _skipWhite endp
-
-;--- int _stdcall strlen(char * pszString)
-
-_strlen proc
-	pop cx
-	pop ax		;get pszString
-	push cx
-	push di
-	mov cx,-1
-	mov di,ax
-	mov al,0
-	cld
-	repnz scasb
-	mov ax,cx
-	inc ax
-	not ax
-	pop di
-	ret
-_strlen endp
 
 ;--- must preserve BX!
 
@@ -3162,8 +3035,11 @@ _FindCommand proc
 	push si
     
 	mov di,ax
-	push di
-	call _strlen
+	.while byte ptr [di]
+		inc di
+	.endw
+	sub di,ax
+	xchg ax,di
 	mov bx,ax		;searchlen
 ;	mov si,[commandline]
 @@F299:
