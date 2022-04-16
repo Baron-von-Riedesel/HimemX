@@ -2760,7 +2760,7 @@ done:
 isfspec:
 	push nextfcharX
 	xor dx,dx
-	mov [longarg],dl
+	mov longarg,dl
 	mov bl,1
 	mov cl,' '
 	cmp @byte [si],'-'
@@ -2768,37 +2768,36 @@ isfspec:
 	dec bx
 	inc si
 @@:
-	mov [flag],bl
+	mov flag,bl
 	cmp @byte [si],'0'
 	jne @F
 	mov cl,'0'
 	inc si
 @@:
-	mov [fill],cx
-	mov [size_],dx
+	mov fill,cx
 	mov bx,dx
-	jmp checkfordigits
+
 nextdigit:
+	cmp @byte [si],'0'
+	jb digitsdone
 	cmp @byte [si],'9'
-	jg digitsdone
+	ja digitsdone
 	lodsb
 	sub al,'0'
 	cbw
-	imul cx,bx,10       ;cx = bx * 10
-	add ax,cx
-	mov bx,ax
-checkfordigits:
-	cmp @byte [si],'0'
-	jge nextdigit
+	imul bx,bx,10
+	add bx,ax
+	jmp nextdigit
+
 digitsdone:
-	mov [size_],bx
+	mov size_,bx
 	cmp @byte [si],'l'
 	jne @F
-	mov @byte [longarg],1
+	mov longarg,1
 	inc si
 @@:
 	lodsb
-	mov [fmt],si
+	mov fmt,si
 	cmp al,'x'
 	je print_x
 	cmp al,'X'
@@ -2813,12 +2812,15 @@ digitsdone:
 	je print_u
 	cmp al,'s'
 	je print_s
-	push '%'
-	jmp @F
+	and al,al
+	jnz @F
+	pop ax
+	jmp done
 print_c:
-	push @word ss:[di]
+	mov ax,ss:[di]
 	add di,2
 @@:
+	push ax
 	call print_char
 	retn
 print_x:
@@ -2831,7 +2833,7 @@ print_i:
 print_u:
 	mov bx,10
 print_number:
-	cmp @byte [longarg],0
+	cmp longarg,0
 	je @F
 	mov eax,ss:[di]
 	add di,4
@@ -2859,46 +2861,34 @@ print_s:
 	add di,2
 
 print_string:
+	mov bx,size_
 	mov ax,si
 	.while byte ptr [si]
 		inc si
 	.endw
 	sub si,ax
 	xchg ax,si
-	sub [size_],ax
-	cmp @byte [flag],1
-	jne @@L360
-	mov bx,[size_]
-	jmp @@L363
+	sub bx,ax
 
-fillcharloop1:
-	push @word [fill]
-	call print_char
-	dec bx
-@@L363:
-	or bx,bx
-	jg fillcharloop1
-	mov [size_],bx
-	jmp @@L360
+	.if flag == 1
+		.while sword ptr bx > 0
+			push fill
+			call print_char
+			dec bx
+		.endw
+	.endif
 
-charoutloopZ:
-	mov al,[si]
-	push ax
-	call print_char
-	inc si
-@@L360:
-	cmp @byte [si],0
-	jne charoutloopZ
+	.while byte ptr [si]
+		lodsb
+		push ax
+		call print_char
+	.endw
 
-	mov bx,[size_]
-fillcharloop2:
-	or bx,bx
-	jle @F
-	push @word [fill]
-	call print_char
-	dec bx
-	jmp fillcharloop2
-@@:
+	.while sword ptr bx > 0
+		push fill
+		call print_char
+		dec bx
+	.endw
 	retn
 
 printf endp

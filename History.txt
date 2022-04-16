@@ -1,7 +1,7 @@
 
   History
 
-  __/__/2020, v3.37:
+  16.12.2020, v3.37:
   - block move routine speed-up.
   - return DX=0 if emb allocation fails (XMS spec).
   - bugfix: printf() did assume SS==DS.
