@@ -1,6 +1,10 @@
 
   History
 
+  21.11.2022, v3.38:
+  - options /MAX and /HMAMIN did only work correctly with decimal numbers
+    and no suffix.
+
   16.12.2020, v3.37:
   - block move routine speed-up.
   - return DX=0 if emb allocation fails (XMS spec).

@@ -66,8 +66,8 @@
 
 ;--- assembly time parameters
 
-VERSIONSTR		equ <'3.37'>
-DRIVER_VER		equ 300h+37
+VERSIONSTR		equ <'3.38'>
+DRIVER_VER		equ 300h+38
 INTERFACE_VER	equ 300h
 
 ifndef NUMHANDLES
@@ -2929,20 +2929,20 @@ _memicmp proc c uses si di psz1:word, psz2:word, len:word
 	ret
 _memicmp endp
 
-;--- _stdcall toupper(char) returns uppercase character
+;--- toupper returns uppercase character of AL
 
 _toupper proc
-	pop cx
-	pop ax
-	push cx
+;--- v3.38: fixed, prototype is NOT "stdcall _toupper(char)"
+;	pop cx
+;	pop ax
+;	push cx
 	cmp al,'a'
-	jb @@I290
+	jb @F
 	cmp al,'z'
-	ja @@I290
+	ja @F
 	sub al,20h
-@@I290:
+@@:
 	ret
-
 _toupper endp
 
 ;--- convert a string into a DWORD, returned in EAX
