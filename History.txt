@@ -1,6 +1,11 @@
 
   History
 
+  12.03.2025, v3.39:
+  - function ah=0Eh (get handle information): returns now error A2h (invalid
+    handle) if size > 65535 kB. This is MS Himem compatible. Previously the
+    reported size was just truncated to 65535 kB.
+
   21.11.2022, v3.38:
   - options /MAX and /HMAMIN did only work correctly with decimal numbers
     and no suffix.

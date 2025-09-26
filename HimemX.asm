@@ -66,8 +66,8 @@
 
 ;--- assembly time parameters
 
-VERSIONSTR		equ <'3.38'>
-DRIVER_VER		equ 300h+38
+VERSIONSTR		equ <'3.39'>
+DRIVER_VER		equ 300h+39
 INTERFACE_VER	equ 300h
 
 ifndef NUMHANDLES
@@ -85,6 +85,8 @@ ifndef ?ALTSTRAT
 endif
 ?MERGE0HDL      equ 1       ;std 0, 1=try to merge even if handle to free has size 0
 ?ALLOCDX0       equ 1       ;std 1, 1=return DX=0 if alloc fails
+;--- change for v3.39: std now 1
+?HINF_MSCOMP    equ 1       ;std 1, 1=ah 0Eh (xms 2 handle info) full MS Himem compatible
 
 ;MAXFREEKB      equ 0FBC0h
 MAXFREEKB       equ 0FFFFh  ;std FFFFh, xms v2.0 max ext. memory
@@ -1670,7 +1672,9 @@ xms_get_handle_info proc
 
 	push cx
 	push edx  ;save Hiword(edx)
+ife ?HINF_MSCOMP
 	pop dx
+endif
 	@DbgOutS <"xms_get_handle_info enter",13,10>
 
 	call xms_ext_get_handle_info
@@ -1685,17 +1689,28 @@ xms_get_handle_info proc
 	mov bl,cl
 
 ;--- the size is returned in 16-bit register DX
-;--- if it's larger than 65535, 65535 is returned.
-;--- MS Himem behaves differently, it returns AX=0
-;--- and BL=A2 (invalid handle).
-	cmp edx,010000h				; dx = min(edx,0xffff);
+	cmp edx,010000h				; dx <= 0xffff?
 	jb @@handle_size_ok
-	mov dx,0ffffh
+;--- if size > 65535, then return
+;--- 1. ax=1, dx=65535 
+;--- 2. ax=0, bl=A2h ("invalid handle"; MS Himem compatible),
+if ?HINF_MSCOMP
+	mov bl,XMS_INVALID_HANDLE
+	dec ax
+	jmp @@get_handle_info_err
+else
+	mov dx,0ffffh				; dx = min(edx,0xffff);
+endif
 @@handle_size_ok:
-
+if ?HINF_MSCOMP
+	add sp,2
+	push dx
+endif
 @@get_handle_info_err:
 
+ife ?HINF_MSCOMP
 	push dx
+endif
 	pop edx   ;restore Hiword(edx)
 	pop cx
 	ret
