@@ -66,8 +66,8 @@
 
 ;--- assembly time parameters
 
-VERSIONSTR		equ <'3.39'>
-DRIVER_VER		equ 300h+39
+VERSIONSTR		equ <'3.40'>
+DRIVER_VER		equ 300h+40
 INTERFACE_VER	equ 300h
 
 ifndef NUMHANDLES
@@ -75,13 +75,19 @@ NUMHANDLES      equ 48      ;std 48, default number of handles
 endif
 MAXHANDLES      equ 128     ;std 128, max number of handles
 ALLOWDISABLEA20 equ 1       ;std 1, 1=allow to disable A20
-BLOCKSIZE       equ 2000h   ;std 2000h, block size moved to/from ext. memory
-USEUNREAL       equ 1       ;std 1, 1=use "unreal" mode for EMB copy
+BLOCKSIZE       equ 2000h   ;std 2000h, block size moved to/from ext. memory (max 16-bits!)
+ifndef USEUNREAL
+USEUNREAL       equ 2       ;std 2, 0=use pmode; 1=set/reset "unreal" mode; 2=set unreal if GPF occurs
+endif
+DISABLEIRQS     equ USEUNREAL ne 2 ;0=don't disable interrupts during block move
 PREF66LGDT      equ 0       ;std 0, 1=use 66h prefix for LGDT
 ?LOG            equ 0       ;std 0, 1=enable /LOG option
 ?TESTMEM        equ 0       ;std 0, 1=enable /TESTMEM:ON|OFF option
 ifndef ?ALTSTRAT
 ?ALTSTRAT       equ 0       ;std 0, 1=use alternate strategie for (re)alloc emb
+endif
+ifndef ?NMIOPT
+?NMIOPT         equ 0       ;std 0, 1=support /NMI cmdline option
 endif
 ?MERGE0HDL      equ 1       ;std 0, 1=try to merge even if handle to free has size 0
 ?ALLOCDX0       equ 1       ;std 1, 1=return DX=0 if alloc fails
@@ -159,6 +165,30 @@ ifdef _DEBUG
 	db 0
 endif
     endm
+
+@NMI_OFF macro savereg
+if ?NMIOPT
+ ifnb <savereg>
+	push savereg
+ endif
+	call nmi_off
+ ifnb <savereg>
+	pop savereg
+ endif
+endif
+endm
+
+@NMI_ON macro savereg
+if ?NMIOPT
+ ifnb <savereg>
+	push savereg
+ endif
+	call nmi_on
+ ifnb <savereg>
+	pop savereg
+ endif
+endif
+endm
 
 @display macro value
 	echo value
@@ -313,6 +343,9 @@ szX				DB '/X',  00H
 szMETHOD		DB '/METHOD:',  00H
 szMAX			DB '/MAX=',  00H
 szMaximum		DB 'Maximum XMS: %luK',  0aH,  00H
+if ?NMIOPT
+szNMI			DB '/NMI',  00H
+endif
 szHMAMIN		DB '/HMAMIN=',  00H
 szMinimum		DB 'Minimum HMA that has to be requested: %uK',  0aH,  00H
 szHMAMAX		DB 'HimemX: HMAMIN must be <= 63, corrected',  0aH,  00H
@@ -384,6 +417,9 @@ if ?TESTMEM
 	db "  /TESTMEM:ON|OFF Performs or skips an extended memory test (def: OFF)",10
 endif
 	db "  /VERBOSE        Gives extra information",10 
+if ?NMIOPT
+	db "  /NMI            Make HimemX NMI aware",10 
+endif
 	db "  /NOABOVE16      Do not use INT 15h function E801h to detect >64M",10
 	db "  /X              Do not use INT 15h function E820h to detect >64M",10
 	db "  /X2MAX32        Limit XMS 2.0 free/avail. memory report to 32M-1K",10
@@ -560,15 +596,30 @@ exit_set_reset_carry:
 
 do_move:
 	pushf
+	@NMI_OFF ax
 	call test_a20
 	jz isdisabled
 	call cs:[old_int15]
+	@NMI_ON ax
 	call enable_a20 	 ; preserves flags
 	jmp exit_set_reset_carry
 isdisabled:
 	call cs:[old_int15]
+	@NMI_ON ax
 	call disable_a20	 ; preserves flags
 	jmp exit_set_reset_carry
+
+if ?NMIOPT
+nmi_off::
+	mov al,80h
+	jmp @F
+nmi_on::
+	mov al,0
+@@:
+	out 70h,al
+	in al,71h
+	ret
+endif
 
 int15_handler endp
 
@@ -583,7 +634,6 @@ int2f_handler proc
 	popf
 	db 0EAh
 old_int2f dd 0            ; old INT 2fh vector
-
 
 @@maybe_my2f:
 	cmp al,00h			; is it "Installation Check"?
@@ -1298,8 +1348,15 @@ endif
 @@move_ok_to_start:
 	SMSW AX 					; don't use priviledged "mov eax,cr0"!
 	test al,1					; are we already in PM?
+if DISABLEIRQS eq 0
+	jnz copy_pm
+	call rmcopy					; no need to loop in this case
+	jmp @@xms_exit_copy
+copy_pm:
+else
 	mov bx,offset rmcopy		; no, switch to pm yourself
 	jz @F
+endif
 	push ss						; set ES for int 15h, ah=87h call
 	pop es
 	mov bx,offset pmcopy		; yes, use INT 15h, ah=87h
@@ -1367,21 +1424,26 @@ endif
 ;  EDI = dst linear adress
 ;  ECX = length (hiword cleared)
 
-;  2 strategies are implemented. The first does the move in protected-mode,
-;  the latter activates "unreal" mode and does the move there.
-;  After the last transfer "unreal" mode is exited. Interrupts occuring
-;  during the "interrupt window" will run in "unreal" mode as well, but
-;  this shouldn't hurt.
+;  3 strategies are implemented: 
+;   1) the block copy is done in protected-mode
+;   2) the block copy is done in "unreal" mode, which is explicitely 
+;      enabled and disabled. After the last transfer "unreal" mode is exited.
+;      Interrupts occuring during the "interrupt window" will run in "unreal"
+;      mode as well, but this shouldn't hurt.
+;   3) An interrupt handler for INT 0Dh is set temporarily, then the copy op
+;      starts, assuming "unreal" mode is active. If assumtion is wrong, an 
+;      exception will occur, and the interrupt handler will enable "unreal".
 
 rmcopy:
 
-ife USEUNREAL
+if USEUNREAL eq 0
 
+	@NMI_OFF
 	pushf
 	cli 					; no interrupts when doing protected mode
-if PREF66LGDT
+  if PREF66LGDT
 	db 66h					; load full 32bit base
-endif
+  endif
 	lgdt fword ptr cs:[gdt32]; load GDTR (use CS prefix here)
 	mov eax,cr0
 	inc ax					; set PE bit
@@ -1392,10 +1454,11 @@ endif
 	mov ds,dx
 	mov es,dx
 
-	shr ecx,2				; get number of DWORDS to move
-	rep movs @dword [edi],[esi]
+;	shr ecx,2				; get number of DWORDS to move
+	shr cx,2				; hiword(ecx) is 0
+	rep movsd [edi],[esi]
 	adc cx,cx
-	rep movs @word [edi],[esi]	 ; move a trailing WORD
+	rep movsw [edi],[esi]	; move a trailing WORD
 
 	db 67h					; don't remove - some 80386s were buggy
 	nop 					; don't remove - some 80386s were buggy
@@ -1410,9 +1473,8 @@ endif
 	clc
 	ret
 
-else
+elseif USEUNREAL eq 1
 
-  if 0
 	pushf
 	cli 					; no interrupts during the block move
 	pushf
@@ -1420,10 +1482,11 @@ else
 	xor dx,dx				; exited by an interrupt routine.
 	mov ds,dx
 	mov es,dx
-	shr ecx,2				; get number of DWORDS to move
-	rep movs @dword [edi],[esi]
+;	shr ecx,2				; get number of DWORDS to move
+	shr cx,2				; hiword(ecx) is 0
+	rep movsd [edi],[esi]
 	adc cx,cx
-	rep movs @word [edi],[esi]	 ; move a trailing WORD
+	rep movsw [edi],[esi]	; move a trailing WORD
 	db 67h					; don't remove - some 80386s were buggy
 	nop 					; don't remove - some 80386s were buggy
 	popf
@@ -1437,9 +1500,10 @@ else
 set_ureal:    
 	mov dx,data32sel
 reset_ureal:
-if PREF66LGDT
+	@NMI_OFF
+  if PREF66LGDT
 	db 66h					; load full 32bit base
-endif
+  endif
 	lgdt fword ptr cs:[gdt32]; load GDTR (use CS prefix here)
 	mov eax,cr0
 	inc ax					; set PE bit
@@ -1452,33 +1516,79 @@ endif
 	mov ds,dx
 	mov es,dx
 	mov cr0,eax
+	@NMI_ON
 	ret
-  else
-;--- set int 0dh, then just start to copy.
-;--- if int 0dh is called, an exception occured, since IRQs are disabled.
-;--- then set unreal mode inside int 0dh code.
-	xor dx,dx
+
+else ; USEUNREAL eq 2
+
 	mov ax,cs
+	shl eax,16
+  if DISABLEIRQS eq 0  ;checks if interrupts may be ON 
+	mov dx, offset myint0d_2   ; NO check for IRQ 5 in INT 0Dh
+	pushf
+	pop ax
+	test ah,2  ; IF set?
+	jz ifdone  ; no check if interrupts disabled
+	mov al,0Bh
+	out 20h,al
+	jmp @F
+@@:
+	in al,20h  ; get ISS
+	test al,20h; IRQ 5 in service?
+	jnz ifdone
+	mov dx, offset myint0d ; check for IRQ 5 in INT 0Dh
+ifdone:
+	mov ax, dx
+  else
+	mov ax, offset myint0d
+  endif
+
+;--- set int 0dh, then start copying.
+;--- if int 0dh is triggered, check PIC to see if it's an IRQ;
+;--- if no, it's an exception and unreal mode is activated.
+
+	xor dx,dx
 	mov ds,dx
 	mov es,dx
+  if DISABLEIRQS
 	pushf
-	shl eax,16
-	mov ax,offset myint0d
-	shr ecx,2				; get number of DWORDS to move
 	cli
+  endif   
+	shr ecx,2				; get number of DWORDS to move
 	xchg eax,ds:[13*4]
-	rep movs @dword [edi],[esi]
+	rep movsd [edi],[esi]
 	adc cx,cx
-	rep movs @word [edi],[esi]	 ; move a trailing WORD
+	rep movsw [edi],[esi]	; move a trailing WORD
 	db 67h					; don't remove - some 80386s were buggy
 	nop 					; don't remove - some 80386s were buggy
 	mov ds:[13*4],eax		; restore int 0dh
+  if DISABLEIRQS
 	popf
+  endif
 	ret
 myint0d:
+  if DISABLEIRQS eq 0
+	push ax
+;--- if IRQs aren't disabled, check if an IRQ 5 is "in service"; 
+;--- if no, assume it's an exception;
+;--- this is the MS Himem way of doing things; however,
+;--- XMS block moves inside an IRQ 5 handler may not work then!
+	mov al,0Bh
+	out 20h,al
+	jmp @F
+@@:
+	in al,20h
+	test al,20h	;IRQ 5 in service?
+	pop ax
+	jz myint0d_2
+	push eax  ;assume eax holds old int 0Dh vector
+	retf
+myint0d_2:
+  endif
+	push eax
 	push ds
 	push es
-	push eax
+	@NMI_OFF
 	lgdt fword ptr cs:[gdt32]; load GDTR (use CS prefix here)
 	mov eax,cr0
 	inc ax					; set PE bit
@@ -1490,14 +1600,13 @@ myint0d:
 	mov ds,dx
 	mov es,dx
 	mov cr0,eax
-	pop eax
+	@NMI_ON
 	pop es
 	pop ds
+	pop eax
 	iret
-  endif
 
 endif
-
 
 ;------------------------------------------------------------------------
 ; cpu is in v86-mode, use int15, ah=87 to copy things around
@@ -3161,6 +3270,17 @@ no_numhandles:
 	mov _x_option,1
 @@:
 
+if ?NMIOPT
+;--- option /NMI
+	push offset szNMI
+	call _FindCommand
+	or ax,ax
+	jne @F
+	mov byte ptr [nmi_off],0C3h
+	mov byte ptr [nmi_on],0C3h
+@@:
+endif
+
 ;--- option /METHOD
 	push offset szMETHOD
 	call _FindCommand
@@ -3430,7 +3550,6 @@ e820_done:
 @@exit:
 	ret
 geti15mem endp
-
 
 ;--- driver init. this proc should be last
 ;--- since it initializes the handle table
